@@ -1,0 +1,18 @@
+# Google credentials and tokens — NEVER commit these
+credentials.json
+token.json
+service_account.json
+
+# Local database
+cases.db
+
+# Python
+*.pyc
+__pycache__/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Other
+inbox.mbox
+.env
