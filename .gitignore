@@ -16,3 +16,7 @@ __pycache__/
 # Other
 inbox.mbox
 .env
+
+# Streamlit secrets — NEVER commit
+.streamlit/secrets.toml
+.streamlit/google_credentials.json

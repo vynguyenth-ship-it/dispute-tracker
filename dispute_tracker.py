@@ -55,8 +55,9 @@ CONFIG = {
     "DB_FILE": os.path.join(os.path.dirname(__file__), "cases.db"),
     "CREDENTIALS_FILE": os.path.join(os.path.dirname(__file__), "credentials.json"),
     "TOKEN_FILE": os.path.join(os.path.dirname(__file__), "token.json"),
-    "SHEET_ID": "YOUR_SHEET_ID_HERE",  # ← paste your Google Sheet ID here
+    "SHEET_ID": "1z9GTxf9bLr9iGttZlYIT41qgRBfEyyFy10j788rs44Q",
     "SHEET_TAB_NAME": "Cases",
+    "ARCHIVE_TAB_NAME": "Archive",
     "TIMEZONE": "Asia/Ho_Chi_Minh",
 }
 
@@ -405,9 +406,101 @@ def _ensure_tab_exists(service, spreadsheet_id: str, tab_name: str):
         log.info(f"Created sheet tab: {tab_name}")
 
 
+# Pastel background colours per queue (RGB 0-1 scale)
+QUEUE_SHEET_COLORS = {
+    "Dispute":          {"red": 1.0,  "green": 0.82, "blue": 0.82},
+    "Update Details":   {"red": 0.80, "green": 0.88, "blue": 1.0 },
+    "Invoice":          {"red": 0.83, "green": 0.97, "blue": 0.83},
+    "Internal Invoice": {"red": 0.92, "green": 0.85, "blue": 1.0 },
+    "Others":           {"red": 0.95, "green": 0.95, "blue": 0.95},
+}
+_HEADER_COLOR = {"red": 0.0, "green": 0.694, "blue": 0.310}   # #00B14F Grab green
+_HEADER_TEXT  = {"red": 1.0, "green": 1.0,   "blue": 1.0}
+
+
+def _fmt_date(val: str) -> str:
+    """Return dd/mm/yyyy only — strips HH:MM if present."""
+    if not val:
+        return val
+    # Already dd/mm/yyyy (10 chars) or dd/mm/yyyy HH:MM (16 chars)
+    return val[:10]
+
+
+def _get_sheet_tab_id(service, spreadsheet_id: str, tab_name: str) -> int:
+    meta = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+    for s in meta.get("sheets", []):
+        if s["properties"]["title"] == tab_name:
+            return s["properties"]["sheetId"]
+    raise ValueError(f"Tab '{tab_name}' not found in spreadsheet.")
+
+
+def _write_tab(service, sheet_id: str, tab_name: str, rows):
+    _ensure_tab_exists(service, sheet_id, tab_name)
+    service.spreadsheets().values().clear(
+        spreadsheetId=sheet_id, range=f"{tab_name}!A:Z",
+    ).execute()
+    service.spreadsheets().values().update(
+        spreadsheetId=sheet_id,
+        range=f"{tab_name}!A1",
+        valueInputOption="RAW",
+        body={"values": rows},
+    ).execute()
+
+
+def _apply_sheet_formatting(service, spreadsheet_id: str, tab_name: str, data_rows: list):
+    """Apply header colour + per-row queue background colours."""
+    tab_id = _get_sheet_tab_id(service, spreadsheet_id, tab_name)
+    n_cols = len(SHEET_COLUMNS)
+    # Queue is column index 4 (0-based) in SHEET_COLUMNS
+    QUEUE_COL = 4
+
+    requests = []
+
+    # ── Header row (row 0) — Grab green background, white bold text ──────────
+    requests.append({
+        "repeatCell": {
+            "range": {"sheetId": tab_id, "startRowIndex": 0, "endRowIndex": 1,
+                      "startColumnIndex": 0, "endColumnIndex": n_cols},
+            "cell": {
+                "userEnteredFormat": {
+                    "backgroundColor": _HEADER_COLOR,
+                    "textFormat": {"bold": True, "foregroundColor": _HEADER_TEXT},
+                }
+            },
+            "fields": "userEnteredFormat(backgroundColor,textFormat)",
+        }
+    })
+
+    # ── Freeze header row ─────────────────────────────────────────────────────
+    requests.append({
+        "updateSheetProperties": {
+            "properties": {"sheetId": tab_id, "gridProperties": {"frozenRowCount": 1}},
+            "fields": "gridProperties.frozenRowCount",
+        }
+    })
+
+    # ── Data rows — colour by queue ───────────────────────────────────────────
+    for i, row in enumerate(data_rows, start=1):   # start=1 → skip header
+        queue = row[QUEUE_COL] if len(row) > QUEUE_COL else ""
+        color = QUEUE_SHEET_COLORS.get(queue, {"red": 1.0, "green": 1.0, "blue": 1.0})
+        requests.append({
+            "repeatCell": {
+                "range": {"sheetId": tab_id, "startRowIndex": i, "endRowIndex": i + 1,
+                          "startColumnIndex": 0, "endColumnIndex": n_cols},
+                "cell": {"userEnteredFormat": {"backgroundColor": color}},
+                "fields": "userEnteredFormat.backgroundColor",
+            }
+        })
+
+    if requests:
+        service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"requests": requests},
+        ).execute()
+
+
 def sync_to_sheet():
     sheet_id = CONFIG["SHEET_ID"]
-    tab_name = CONFIG["SHEET_TAB_NAME"]
 
     if sheet_id == "YOUR_SHEET_ID_HERE":
         log.warning("SHEET_ID not configured — skipping sheet sync.")
@@ -415,34 +508,43 @@ def sync_to_sheet():
 
     try:
         service = get_sheets_service()
-        _ensure_tab_exists(service, sheet_id, tab_name)
 
+        # ── Active cases → "Cases" tab ────────────────────────────────────────
         with get_db() as conn:
-            rows = conn.execute(
+            active_rows = conn.execute(
                 "SELECT case_id, date_received, sender, subject, queue, "
                 "status, assigned_to, assigned_at, completed_at, email_link "
                 "FROM cases WHERE archived = 0 ORDER BY date_received DESC"
             ).fetchall()
 
-        values = [SHEET_COLUMNS] + [
-            [r["case_id"], r["date_received"], r["sender"], r["subject"],
+        active_data = [
+            [r["case_id"], _fmt_date(r["date_received"]), r["sender"], r["subject"],
              r["queue"], r["status"], r["assigned_to"], r["assigned_at"],
              r["completed_at"], r["email_link"]]
-            for r in rows
+            for r in active_rows
         ]
+        _write_tab(service, sheet_id, CONFIG["SHEET_TAB_NAME"], [SHEET_COLUMNS] + active_data)
+        _apply_sheet_formatting(service, sheet_id, CONFIG["SHEET_TAB_NAME"], active_data)
+        log.info(f"Synced {len(active_rows)} active cases → '{CONFIG['SHEET_TAB_NAME']}' tab.")
 
-        service.spreadsheets().values().clear(
-            spreadsheetId=sheet_id,
-            range=f"{tab_name}!A:Z",
-        ).execute()
-        service.spreadsheets().values().update(
-            spreadsheetId=sheet_id,
-            range=f"{tab_name}!A1",
-            valueInputOption="RAW",
-            body={"values": values},
-        ).execute()
+        # ── Archived cases → "Archive" tab ────────────────────────────────────
+        with get_db() as conn:
+            archive_rows = conn.execute(
+                "SELECT case_id, date_received, sender, subject, queue, "
+                "status, assigned_to, assigned_at, completed_at, email_link "
+                "FROM cases WHERE archived = 1 ORDER BY completed_at DESC"
+            ).fetchall()
 
-        log.info(f"Synced {len(rows)} cases to Google Sheet (tab: {tab_name}).")
+        archive_data = [
+            [r["case_id"], _fmt_date(r["date_received"]), r["sender"], r["subject"],
+             r["queue"], r["status"], r["assigned_to"], r["assigned_at"],
+             r["completed_at"], r["email_link"]]
+            for r in archive_rows
+        ]
+        _write_tab(service, sheet_id, CONFIG["ARCHIVE_TAB_NAME"], [SHEET_COLUMNS] + archive_data)
+        _apply_sheet_formatting(service, sheet_id, CONFIG["ARCHIVE_TAB_NAME"], archive_data)
+        log.info(f"Synced {len(archive_rows)} archived cases → '{CONFIG['ARCHIVE_TAB_NAME']}' tab.")
+
     except Exception as e:
         log.error(f"Sheet sync failed: {e}")
 

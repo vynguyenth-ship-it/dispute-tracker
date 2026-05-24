@@ -161,6 +161,58 @@ Rules are checked in order. Use `reclassify` to override manually.
 
 ---
 
+## Web UI (Streamlit)
+
+### Step A — Configure OAuth for the web UI
+
+The Streamlit app uses a **separate** OAuth client from the poller (same Google Cloud project, different client).
+
+1. Go to Google Cloud Console → **APIs & Services → Credentials → Create Credentials → OAuth client ID → Web application**
+2. Add `http://localhost:8501` as an **Authorised redirect URI**
+3. Download the client ID and secret, then fill in `.streamlit/secrets.toml`:
+
+```toml
+[google_oauth]
+client_id     = "YOUR_WEB_CLIENT_ID"
+client_secret = "YOUR_WEB_CLIENT_SECRET"
+redirect_uri  = "http://localhost:8501"
+
+cookie_key = "pick-any-random-string"
+```
+
+> **Never commit `.streamlit/secrets.toml`** — it is listed in `.gitignore`.
+
+### Step B — Run locally
+
+```bash
+streamlit run streamlit_app.py
+```
+
+Opens at **http://localhost:8501**. Users sign in with their `@grabtaxi.com` Google account.
+
+Pages:
+- **Dashboard** — KPI metrics, clickable queue cards, bar chart + daily trend line
+- **Cases** — search, date range, filters, assign/complete/reclassify, send email
+- **Archive** — completed + archived cases (read-only)
+
+The Streamlit UI and the poller (`python dispute_tracker.py poll`) share `cases.db` and can run simultaneously.
+
+### Step C — Share with the team (ngrok)
+
+```bash
+ngrok http 8501
+```
+
+1. Copy the `https://xxxx.ngrok.io` URL
+2. Update `redirect_uri` in `.streamlit/secrets.toml` to match
+3. Add the same URL as an Authorised redirect URI in Google Cloud Console
+4. Restart Streamlit: `streamlit run streamlit_app.py`
+5. Share the ngrok URL with your team — they log in with their Grab Gmail
+
+> **Note on Send Email:** Sending from `account.receivable.vn@grabtaxi.com` requires the host account to have **Send As** access to the group inbox in Gmail settings (`Settings → Accounts → Send mail as`). If not set up, emails send from the host's personal account instead.
+
+---
+
 ## Running as a background service (optional)
 
 **Windows — Task Scheduler:**
@@ -198,7 +250,9 @@ git commit -m "describe your change"
 
 | File | Purpose |
 |---|---|
-| `dispute_tracker.py` | Main script |
+| `dispute_tracker.py` | Main script (poller + CLI) |
+| `streamlit_app.py` | Streamlit web UI (Dashboard, Cases, Archive) |
+| `.streamlit/secrets.toml` | OAuth config for web UI — keep private, **never commit** |
 | `gmail_auth.ipynb` | Jupyter notebook version of the pipeline |
 | `requirements.txt` | Python dependencies |
 | `credentials.json` | OAuth client secrets — keep private, **never commit** |
