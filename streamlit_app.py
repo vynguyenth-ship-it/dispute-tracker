@@ -5,6 +5,7 @@ Share: ngrok http 8501  (update redirect_uri in .streamlit/secrets.toml to match
 """
 import base64
 import json as _json
+import threading
 import urllib.parse
 from datetime import datetime, date, timedelta
 
@@ -12,6 +13,10 @@ import pandas as pd
 import streamlit as st
 
 from dispute_tracker import get_db, update_case, TZ, init_db, CONFIG, sync_to_sheet
+
+
+def sync_to_sheet_async():
+    threading.Thread(target=sync_to_sheet, daemon=True).start()
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 QUEUES   = ["Dispute", "Update Details", "Invoice", "Internal Invoice", "Others"]
@@ -680,21 +685,21 @@ def page_cases():
             )
             if nq != row["queue"]:
                 update_case(cid, queue=nq)
-                sync_to_sheet()
+                sync_to_sheet_async()
                 st.cache_data.clear()
                 st.rerun()
         with b2:
             if st.button("👤 Assign to Me", key=f"a_{cid}", type="primary", use_container_width=True):
                 now = datetime.now(TZ).strftime("%d/%m/%Y %H:%M")
                 update_case(cid, status="In Progress", assigned_to=logged_in_user, assigned_at=now)
-                sync_to_sheet()
+                sync_to_sheet_async()
                 st.cache_data.clear()
                 st.rerun()
         with b3:
             if st.button("✅ Mark Complete", key=f"c_{cid}", use_container_width=True):
                 now = datetime.now(TZ).strftime("%d/%m/%Y %H:%M")
                 update_case(cid, status="Completed", completed_at=now)
-                sync_to_sheet()
+                sync_to_sheet_async()
                 st.cache_data.clear()
                 st.rerun()
         with b4:
