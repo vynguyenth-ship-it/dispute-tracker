@@ -123,6 +123,7 @@ def classify_email(subject: str, body: str) -> str:
 def get_db() -> sqlite3.Connection:
     conn = sqlite3.connect(CONFIG["DB_FILE"])
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
     return conn
 
 
