@@ -367,8 +367,8 @@ def page_home():
             buttons.forEach(btn => {{
                 const txt = btn.innerText || '';
                 if (LABELS.some(l => txt.includes(l))) {{
-                    btn.style.height = '160px';
-                    btn.style.minHeight = '160px';
+                    btn.style.height = 'auto';
+                    btn.style.minHeight = '90px';
                     btn.style.whiteSpace = 'pre-wrap';
                     btn.style.lineHeight = '1.7';
                     btn.style.flexDirection = 'column';
