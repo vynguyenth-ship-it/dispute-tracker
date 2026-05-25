@@ -621,21 +621,22 @@ def page_cases():
         filtered = filtered[filtered["_date"].apply(
             lambda d: d is not None and date_from <= d <= date_to
         )]
-        if sort_by == "Newest First":
-            filtered = filtered.sort_values("case_id", ascending=False)
-        elif sort_by == "Oldest First":
-            filtered = filtered.sort_values("case_id", ascending=True)
-        elif sort_by == "By Status":
-            order = {"New": 0, "In Progress": 1, "Completed": 2}
-            filtered = filtered.assign(_so=filtered["status"].map(order)).sort_values(
-                ["_so", "case_id"], ascending=[True, False])
-        elif sort_by == "By Queue":
-            filtered = filtered.sort_values(["queue", "case_id"], ascending=[True, False])
+        if not filtered.empty:
+            if sort_by == "Newest First":
+                filtered = filtered.sort_values("case_id", ascending=False)
+            elif sort_by == "Oldest First":
+                filtered = filtered.sort_values("case_id", ascending=True)
+            elif sort_by == "By Status":
+                order = {"New": 0, "In Progress": 1, "Completed": 2}
+                filtered = filtered.assign(_so=filtered["status"].map(order)).sort_values(
+                    ["_so", "case_id"], ascending=[True, False])
+            elif sort_by == "By Queue":
+                filtered = filtered.sort_values(["queue", "case_id"], ascending=[True, False])
 
     total = len(filtered)
 
     if filtered.empty:
-        st.info("No cases match the current filters.")
+        st.info("No active cases for this queue.")
         return
 
     n_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
