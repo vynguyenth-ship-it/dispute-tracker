@@ -379,11 +379,11 @@ def page_home():
                 const stats = lines.slice(3).join('  ');
                 btn.innerHTML =
                     '<span style="font-size:22px;line-height:1">' + icon + '</span>' +
-                    '<span style="font-size:28px;font-weight:700;line-height:1.2;color:#00802E">' + count + '</span>' +
+                    '<span style="font-size:36px;font-weight:800;line-height:1.2;color:#00802E">' + count + '</span>' +
                     '<span style="font-size:12px;font-weight:600">' + name + '</span>' +
                     '<span style="font-size:11px;color:#888;margin-top:2px">' + stats + '</span>';
-                btn.style.height = '160px';
-                btn.style.minHeight = '160px';
+                btn.style.height = '200px';
+                btn.style.minHeight = '200px';
                 btn.style.display = 'flex';
                 btn.style.flexDirection = 'column';
                 btn.style.alignItems = 'center';
