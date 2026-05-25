@@ -55,7 +55,7 @@ CONFIG = {
     "DB_FILE": os.path.join(os.path.dirname(__file__), "cases.db"),
     "CREDENTIALS_FILE": os.path.join(os.path.dirname(__file__), "credentials.json"),
     "TOKEN_FILE": os.path.join(os.path.dirname(__file__), "token.json"),
-    "SHEET_ID": "1z9GTxf9bLr9iGttZlYIT41qgRBfEyyFy10j788rs44Q",
+    "SHEET_ID": "1tdTFveOGwKRm_d8W_1QyJuM7j1Pn_HioSRC3HhOCmd0",
     "SHEET_TAB_NAME": "Cases",
     "ARCHIVE_TAB_NAME": "Archive",
     "TIMEZONE": "Asia/Ho_Chi_Minh",
@@ -213,6 +213,21 @@ def get_gmail_service():
 
 
 def get_sheets_service():
+    try:
+        import streamlit as st
+        if hasattr(st, "secrets") and "gcp_service_account" in st.secrets:
+            from google.oauth2.service_account import Credentials as SACredentials
+            info = dict(st.secrets["gcp_service_account"])
+            creds = SACredentials.from_service_account_info(info, scopes=SCOPES)
+            return build("sheets", "v4", credentials=creds)
+    except Exception:
+        pass
+    # fallback: use service_account.json locally
+    sa_file = os.path.join(os.path.dirname(__file__), "service_account.json")
+    if os.path.exists(sa_file):
+        from google.oauth2.service_account import Credentials as SACredentials
+        creds = SACredentials.from_service_account_file(sa_file, scopes=SCOPES)
+        return build("sheets", "v4", credentials=creds)
     return build("sheets", "v4", credentials=_get_or_refresh_creds())
 
 
@@ -423,7 +438,6 @@ def _fmt_date(val: str) -> str:
     """Return dd/mm/yyyy only — strips HH:MM if present."""
     if not val:
         return val
-    # Already dd/mm/yyyy (10 chars) or dd/mm/yyyy HH:MM (16 chars)
     return val[:10]
 
 
@@ -452,12 +466,10 @@ def _apply_sheet_formatting(service, spreadsheet_id: str, tab_name: str, data_ro
     """Apply header colour + per-row queue background colours."""
     tab_id = _get_sheet_tab_id(service, spreadsheet_id, tab_name)
     n_cols = len(SHEET_COLUMNS)
-    # Queue is column index 4 (0-based) in SHEET_COLUMNS
     QUEUE_COL = 4
 
     requests = []
 
-    # ── Header row (row 0) — Grab green background, white bold text ──────────
     requests.append({
         "repeatCell": {
             "range": {"sheetId": tab_id, "startRowIndex": 0, "endRowIndex": 1,
@@ -472,7 +484,6 @@ def _apply_sheet_formatting(service, spreadsheet_id: str, tab_name: str, data_ro
         }
     })
 
-    # ── Freeze header row ─────────────────────────────────────────────────────
     requests.append({
         "updateSheetProperties": {
             "properties": {"sheetId": tab_id, "gridProperties": {"frozenRowCount": 1}},
@@ -480,8 +491,7 @@ def _apply_sheet_formatting(service, spreadsheet_id: str, tab_name: str, data_ro
         }
     })
 
-    # ── Data rows — colour by queue ───────────────────────────────────────────
-    for i, row in enumerate(data_rows, start=1):   # start=1 → skip header
+    for i, row in enumerate(data_rows, start=1):
         queue = row[QUEUE_COL] if len(row) > QUEUE_COL else ""
         color = QUEUE_SHEET_COLORS.get(queue, {"red": 1.0, "green": 1.0, "blue": 1.0})
         requests.append({
@@ -510,7 +520,6 @@ def sync_to_sheet():
     try:
         service = get_sheets_service()
 
-        # ── Active cases → "Cases" tab ────────────────────────────────────────
         with get_db() as conn:
             active_rows = conn.execute(
                 "SELECT case_id, date_received, sender, subject, queue, "
@@ -528,7 +537,6 @@ def sync_to_sheet():
         _apply_sheet_formatting(service, sheet_id, CONFIG["SHEET_TAB_NAME"], active_data)
         log.info(f"Synced {len(active_rows)} active cases → '{CONFIG['SHEET_TAB_NAME']}' tab.")
 
-        # ── Archived cases → "Archive" tab ────────────────────────────────────
         with get_db() as conn:
             archive_rows = conn.execute(
                 "SELECT case_id, date_received, sender, subject, queue, "
@@ -600,7 +608,6 @@ def send_slack_batch(items: list[dict]):
             time.sleep(0.2)
         return
 
-    # Summary for large batches
     by_queue: dict[str, int] = {}
     for item in items:
         by_queue[item["queue"]] = by_queue.get(item["queue"], 0) + 1
@@ -709,13 +716,11 @@ def cmd_poll(_args):
 def cmd_diagnose(_args):
     print("\n=== Dispute Tracker Diagnostic ===")
 
-    # Slack
     if SLACK_WEBHOOK_URL:
         print("✅ SLACK_WEBHOOK_URL is set")
     else:
         print("⚠️  SLACK_WEBHOOK_URL not set (export it or edit this file)")
 
-    # DB
     try:
         with get_db() as conn:
             total = conn.execute("SELECT COUNT(*) FROM cases WHERE archived = 0").fetchone()[0]
@@ -724,7 +729,6 @@ def cmd_diagnose(_args):
     except Exception as e:
         print(f"❌ DB error: {e}")
 
-    # Gmail
     try:
         service = get_gmail_service()
         profile = service.users().getProfile(userId="me").execute()
@@ -758,7 +762,6 @@ def cmd_test_classify(_args):
 
 
 def cmd_debug_archive(_args):
-    """Show which Completed cases would be archived without actually archiving them."""
     print("\n=== Archive Debug ===")
     cutoff = datetime.now(TZ) - timedelta(days=CONFIG["ARCHIVE_AFTER_DAYS"])
     print(f"Cutoff: cases completed before {cutoff.strftime('%d/%m/%Y')} will be archived")
@@ -791,7 +794,6 @@ def cmd_debug_archive(_args):
 
 
 def cmd_diagnose_rows(_args):
-    """Health check of DB rows — find empty or corrupted entries."""
     print("\n=== Sheet Health Check ===")
 
     with get_db() as conn:
@@ -822,7 +824,6 @@ def cmd_diagnose_rows(_args):
 
 
 def cmd_cleanup_corrupted(_args):
-    """Remove rows with an empty case_id from the database."""
     with get_db() as conn:
         result = conn.execute(
             "DELETE FROM cases WHERE case_id IS NULL OR TRIM(case_id) = ''"
@@ -832,7 +833,6 @@ def cmd_cleanup_corrupted(_args):
 
 
 def cmd_test_archive(_args):
-    """Create fake old/new completed cases and verify the archive logic."""
     print("\n=== Archive Test Started ===")
 
     now = datetime.now(TZ)
@@ -842,35 +842,28 @@ def cmd_test_archive(_args):
     today_received = now.strftime("%d/%m/%Y %H:%M")
 
     test_rows = [
-        # Should archive (5 days old)
         {"case_id": "ARCHTEST-001", "message_id": "archtest-msg-001", "date_received": today_received,
          "sender": "old.user.1@test.com", "subject": "[ARCHTEST] Old case 1", "queue": "Dispute",
          "email_link": "https://mail.google.com"},
         {"case_id": "ARCHTEST-002", "message_id": "archtest-msg-002", "date_received": today_received,
          "sender": "old.user.2@test.com", "subject": "[ARCHTEST] Old case 2", "queue": "Invoice",
          "email_link": "https://mail.google.com"},
-        # Should NOT archive (completed today)
         {"case_id": "ARCHTEST-003", "message_id": "archtest-msg-003", "date_received": today_received,
          "sender": "today.user@test.com", "subject": "[ARCHTEST] Today completed", "queue": "Invoice",
          "email_link": "https://mail.google.com"},
-        # Should NOT archive (In Progress)
         {"case_id": "ARCHTEST-004", "message_id": "archtest-msg-004", "date_received": today_received,
          "sender": "stuck.user@test.com", "subject": "[ARCHTEST] In progress", "queue": "Others",
          "email_link": "https://mail.google.com"},
-        # Should NOT archive (New)
         {"case_id": "ARCHTEST-005", "message_id": "archtest-msg-005", "date_received": today_received,
          "sender": "new.user@test.com", "subject": "[ARCHTEST] Brand new", "queue": "Others",
          "email_link": "https://mail.google.com"},
     ]
 
     insert_cases(test_rows)
-
-    # Set statuses and completed_at values
     update_case("ARCHTEST-001", status="Completed", completed_at=old_completed_at)
     update_case("ARCHTEST-002", status="Completed", completed_at=old_completed_at)
     update_case("ARCHTEST-003", status="Completed", completed_at=today_completed_at)
     update_case("ARCHTEST-004", status="In Progress")
-    # ARCHTEST-005 stays as New
 
     with get_db() as conn:
         before_active = conn.execute("SELECT COUNT(*) FROM cases WHERE archived = 0").fetchone()[0]
@@ -903,7 +896,6 @@ def cmd_test_archive(_args):
 
 
 def cmd_cleanup_test(_args):
-    """Remove all TEST-* and ARCHTEST-* rows from the database."""
     with get_db() as conn:
         result = conn.execute(
             "DELETE FROM cases WHERE case_id LIKE 'TEST-%' OR case_id LIKE 'ARCHTEST-%'"
@@ -913,7 +905,6 @@ def cmd_cleanup_test(_args):
 
 
 def cmd_test_assign(_args):
-    """Test assignCase on the first 'New' case in the DB."""
     with get_db() as conn:
         row = conn.execute(
             "SELECT case_id FROM cases WHERE status = 'New' AND archived = 0 LIMIT 1"
@@ -940,13 +931,96 @@ def cmd_test_assign(_args):
         print(f"❌ Error: {e}")
 
 
+def load_cases(tab_name: str | None = None) -> list[dict]:
+    """Read all rows from a sheet tab; return as list of field-keyed dicts for the Streamlit UI."""
+    tab = tab_name or CONFIG["SHEET_TAB_NAME"]
+    _COL_MAP = {
+        "Case ID": "case_id", "Date Received": "date_received", "Sender": "sender",
+        "Subject": "subject", "Queue": "queue", "Status": "status",
+        "Assigned To": "assigned_to", "Assigned At": "assigned_at",
+        "Completed At": "completed_at", "Email Link": "email_link",
+    }
+    try:
+        service = get_sheets_service()
+        result = service.spreadsheets().values().get(
+            spreadsheetId=CONFIG["SHEET_ID"],
+            range=f"{tab}!A:J",
+        ).execute()
+        values = result.get("values", [])
+        if len(values) < 2:
+            return []
+        header = values[0]
+        rows = []
+        for row in values[1:]:
+            d = {}
+            for i, h in enumerate(header):
+                field = _COL_MAP.get(h, h.lower().replace(" ", "_"))
+                d[field] = row[i] if i < len(row) else ""
+            if any(d.values()):
+                rows.append(d)
+        return rows
+    except Exception as e:
+        log.error(f"load_cases from '{tab}' failed: {e}")
+        return []
+
+
+def archive_case(case_id: str):
+    """Move a single row from the Cases tab to the Archive tab."""
+    try:
+        service = get_sheets_service()
+        sheet_id = CONFIG["SHEET_ID"]
+        cases_tab = CONFIG["SHEET_TAB_NAME"]
+        archive_tab = CONFIG["ARCHIVE_TAB_NAME"]
+
+        result = service.spreadsheets().values().get(
+            spreadsheetId=sheet_id, range=f"{cases_tab}!A:J",
+        ).execute()
+        values = result.get("values", [])
+        row_num = next((i + 1 for i, r in enumerate(values) if r and r[0] == case_id), None)
+        if row_num is None:
+            log.error(f"archive_case: {case_id} not found")
+            return
+        row_data = values[row_num - 1][:]
+        while len(row_data) < len(SHEET_COLUMNS):
+            row_data.append("")
+
+        meta = service.spreadsheets().get(spreadsheetId=sheet_id).execute()
+        tab_ids = {s["properties"]["title"]: s["properties"]["sheetId"] for s in meta.get("sheets", [])}
+        if archive_tab not in tab_ids:
+            service.spreadsheets().batchUpdate(
+                spreadsheetId=sheet_id,
+                body={"requests": [{"addSheet": {"properties": {"title": archive_tab}}}]},
+            ).execute()
+            service.spreadsheets().values().update(
+                spreadsheetId=sheet_id, range=f"{archive_tab}!A1",
+                valueInputOption="RAW", body={"values": [SHEET_COLUMNS]},
+            ).execute()
+            meta = service.spreadsheets().get(spreadsheetId=sheet_id).execute()
+            tab_ids = {s["properties"]["title"]: s["properties"]["sheetId"] for s in meta.get("sheets", [])}
+
+        service.spreadsheets().values().append(
+            spreadsheetId=sheet_id, range=f"{archive_tab}!A:J",
+            valueInputOption="RAW", insertDataOption="INSERT_ROWS",
+            body={"values": [row_data]},
+        ).execute()
+
+        service.spreadsheets().batchUpdate(
+            spreadsheetId=sheet_id,
+            body={"requests": [{"deleteDimension": {"range": {
+                "sheetId": tab_ids[cases_tab], "dimension": "ROWS",
+                "startIndex": row_num - 1, "endIndex": row_num,
+            }}}]},
+        ).execute()
+        log.info(f"Archived {case_id}")
+    except Exception as e:
+        log.error(f"archive_case failed for {case_id}: {e}")
+
+
 def cmd_sync_sheet(_args):
-    """Manually push all active cases to Google Sheets."""
     sync_to_sheet()
 
 
 def cmd_list_triggers(_args):
-    """Show the current schedule configuration."""
     jobs = schedule.jobs
     print(f"\n=== Scheduled Jobs ({len(jobs)}) ===")
     if not jobs:
