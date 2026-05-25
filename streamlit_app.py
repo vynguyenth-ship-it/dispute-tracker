@@ -1,22 +1,20 @@
 """
 Dispute Case Tracker — Streamlit Web UI
-Run:  streamlit run streamlit_app.py
-Share: ngrok http 8501  (update redirect_uri in .streamlit/secrets.toml to match)
+Data source: Google Sheets (no local SQLite)
+Deploy: streamlit run streamlit_app.py  |  Streamlit Cloud
 """
 import base64
 import json as _json
-import threading
 import urllib.parse
 from datetime import datetime, date, timedelta
 
 import pandas as pd
 import streamlit as st
 
-from dispute_tracker import get_db, update_case, TZ, init_db, CONFIG, sync_to_sheet
-
-
-def sync_to_sheet_async():
-    threading.Thread(target=sync_to_sheet, daemon=True).start()
+from dispute_tracker import (
+    load_cases, update_case, archive_case, archive_old_completed,
+    TZ, CONFIG,
+)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 QUEUES   = ["Dispute", "Update Details", "Invoice", "Internal Invoice", "Others"]
@@ -33,13 +31,11 @@ GRAB_GREEN = "#00B14F"
 GRAB_DARK  = "#00802E"
 GRAB_LIGHT = "#E8F7EE"
 
-# Status → left-border colour for case cards
 STATUS_COLOR = {
     "New":         "#F5A623",
     "In Progress": "#4A90D9",
     "Completed":   "#00B14F",
 }
-
 
 # ── Page config & CSS ─────────────────────────────────────────────────────────
 st.set_page_config(
@@ -51,7 +47,6 @@ st.set_page_config(
 
 THEME_CSS = f"""
 <style>
-/* ── Uniform white background ── */
 html, body,
 [data-testid="stAppViewContainer"],
 [data-testid="stMain"],
@@ -59,128 +54,59 @@ html, body,
     background-color: #ffffff !important;
     font-family: "Google Sans", -apple-system, sans-serif;
 }}
-
-/* ── Top nav bar ── */
 [data-testid="stHeader"] {{ background-color: {GRAB_GREEN}; }}
-
-/* ── Sidebar — white, green left border ── */
 [data-testid="stSidebar"] {{
     background-color: #ffffff !important;
     border-right: 2px solid {GRAB_GREEN};
 }}
 [data-testid="stSidebar"] label,
-[data-testid="stSidebar"] p {{
-    color: {GRAB_DARK} !important;
-    font-weight: 500 !important;
-}}
+[data-testid="stSidebar"] p {{ color: {GRAB_DARK} !important; font-weight: 500 !important; }}
 [data-testid="stSidebar"] [data-baseweb="input"] input,
 [data-testid="stSidebar"] [data-baseweb="select"] > div {{
-    border-color: {GRAB_GREEN} !important;
-    border-radius: 6px !important;
-    background: #ffffff !important;
+    border-color: {GRAB_GREEN} !important; border-radius: 6px !important; background: #ffffff !important;
 }}
 [data-testid="stSidebar"] [data-baseweb="tag"] {{
-    background-color: {GRAB_GREEN} !important;
-    color: white !important;
-    border-radius: 4px !important;
+    background-color: {GRAB_GREEN} !important; color: white !important; border-radius: 4px !important;
 }}
 [data-testid="stSidebar"] .stDateInput [data-baseweb="input"] {{
-    border-color: {GRAB_GREEN} !important;
-    border-radius: 6px !important;
+    border-color: {GRAB_GREEN} !important; border-radius: 6px !important;
 }}
-
-/* ── Metric cards ── */
 [data-testid="stMetric"] {{
-    background: #ffffff;
-    border: 1px solid #d4edda;
-    border-left: 4px solid {GRAB_GREEN};
-    border-radius: 8px;
-    padding: 12px 16px !important;
+    background: #ffffff; border: 1px solid #d4edda;
+    border-left: 4px solid {GRAB_GREEN}; border-radius: 8px; padding: 12px 16px !important;
 }}
 [data-testid="stMetricValue"] {{ color: {GRAB_GREEN} !important; font-size: 28px !important; }}
 [data-testid="stMetricLabel"] {{ color: #555 !important; font-size: 13px !important; }}
-
-/* ── All buttons ── */
 div[data-testid="stButton"] > button {{
-    height: 38px !important;
-    font-size: 13px !important;
-    font-weight: 600 !important;
-    background: #ffffff !important;
-    border: 1.5px solid {GRAB_GREEN} !important;
-    color: {GRAB_GREEN} !important;
-    border-radius: 8px !important;
-    transition: all 0.15s;
+    height: 38px !important; font-size: 13px !important; font-weight: 600 !important;
+    background: #ffffff !important; border: 1.5px solid {GRAB_GREEN} !important;
+    color: {GRAB_GREEN} !important; border-radius: 8px !important; transition: all 0.15s;
 }}
 div[data-testid="stButton"] > button:hover {{
-    background: {GRAB_LIGHT} !important;
-    border-color: {GRAB_DARK} !important;
+    background: {GRAB_LIGHT} !important; border-color: {GRAB_DARK} !important;
 }}
 div[data-testid="stButton"] > button[kind="primary"] {{
-    background: {GRAB_GREEN} !important;
-    color: white !important;
-    border: none !important;
+    background: {GRAB_GREEN} !important; color: white !important; border: none !important;
 }}
-div[data-testid="stButton"] > button[kind="primary"]:hover {{
-    background: {GRAB_DARK} !important;
-}}
-div[data-testid="stButton"] > button[kind="secondary"][disabled] {{
-    opacity: 0.4 !important;
-}}
-
-/* ── Link buttons ── */
+div[data-testid="stButton"] > button[kind="primary"]:hover {{ background: {GRAB_DARK} !important; }}
 [data-testid="stLinkButton"] > a {{
-    background: #ffffff !important;
-    color: {GRAB_GREEN} !important;
-    border: 1.5px solid {GRAB_GREEN} !important;
-    border-radius: 8px !important;
-    padding: 8px 16px !important;
-    font-weight: 600 !important;
-    font-size: 13px !important;
-    text-decoration: none !important;
-    display: inline-block !important;
-    height: 38px !important;
-    line-height: 22px !important;
+    background: #ffffff !important; color: {GRAB_GREEN} !important;
+    border: 1.5px solid {GRAB_GREEN} !important; border-radius: 8px !important;
+    padding: 8px 16px !important; font-weight: 600 !important; font-size: 13px !important;
+    text-decoration: none !important; display: inline-block !important;
+    height: 38px !important; line-height: 22px !important;
 }}
-[data-testid="stLinkButton"] > a:hover {{
-    background: {GRAB_LIGHT} !important;
-}}
-
-/* ── Dataframe header ── */
+[data-testid="stLinkButton"] > a:hover {{ background: {GRAB_LIGHT} !important; }}
 [data-testid="stDataFrame"] th {{
-    background-color: {GRAB_LIGHT} !important;
-    color: {GRAB_GREEN} !important;
-    font-weight: 600 !important;
+    background-color: {GRAB_LIGHT} !important; color: {GRAB_GREEN} !important; font-weight: 600 !important;
 }}
-
-/* ── Tabs ── */
 [data-testid="stTabs"] [role="tab"][aria-selected="true"] {{
-    color: {GRAB_GREEN} !important;
-    border-bottom: 2px solid {GRAB_GREEN} !important;
-    font-weight: 600 !important;
+    color: {GRAB_GREEN} !important; border-bottom: 2px solid {GRAB_GREEN} !important; font-weight: 600 !important;
 }}
-
-/* ── Container borders ── */
 [data-testid="stVerticalBlockBorderWrapper"] {{
-    border: 1px solid #e8e8e8 !important;
-    border-radius: 8px !important;
-    background: #ffffff !important;
+    border: 1px solid #e8e8e8 !important; border-radius: 8px !important; background: #ffffff !important;
 }}
-
 hr {{ border-color: #e8e8e8 !important; }}
-
-/* ── Pagination buttons — fixed equal width, text always fits ── */
-button[kind="secondary"][data-testid="pg_prev"],
-button[kind="secondary"][data-testid="pg_next"],
-button[kind="primary"][data-testid="pg_prev"],
-button[kind="primary"][data-testid="pg_next"] {{
-    width: 100% !important;
-    min-width: 0 !important;
-    font-size: 13px !important;
-    white-space: nowrap !important;
-    padding: 0 8px !important;
-    overflow: hidden !important;
-    text-overflow: ellipsis !important;
-}}
 </style>
 """
 st.markdown(THEME_CSS, unsafe_allow_html=True)
@@ -260,34 +186,28 @@ def _require_login():
 # ── Data helpers ──────────────────────────────────────────────────────────────
 @st.cache_data(ttl=60)
 def load_active_cases() -> pd.DataFrame:
-    with get_db() as conn:
-        rows = conn.execute(
-            "SELECT case_id, date_received, sender, subject, queue, status, "
-            "assigned_to, assigned_at, completed_at, email_link "
-            "FROM cases WHERE archived = 0 ORDER BY date_received DESC"
-        ).fetchall()
+    try:
+        rows = load_cases(CONFIG["SHEET_TAB_NAME"])
+    except Exception as e:
+        st.error(f"Sheet load error: {e}")
+        rows = []
     if not rows:
         return pd.DataFrame(columns=[
             "case_id", "date_received", "sender", "subject", "queue",
             "status", "assigned_to", "assigned_at", "completed_at", "email_link",
         ])
-    return pd.DataFrame([dict(r) for r in rows])
+    return pd.DataFrame(rows)
 
 
 @st.cache_data(ttl=60)
 def load_archived_cases() -> pd.DataFrame:
-    with get_db() as conn:
-        rows = conn.execute(
-            "SELECT case_id, date_received, sender, subject, queue, status, "
-            "assigned_to, assigned_at, completed_at, email_link "
-            "FROM cases WHERE archived = 1 ORDER BY completed_at DESC"
-        ).fetchall()
+    rows = load_cases(CONFIG["ARCHIVE_TAB_NAME"])
     if not rows:
         return pd.DataFrame(columns=[
             "case_id", "date_received", "sender", "subject", "queue",
             "status", "assigned_to", "assigned_at", "completed_at", "email_link",
         ])
-    return pd.DataFrame([dict(r) for r in rows])
+    return pd.DataFrame(rows)
 
 
 def _parse_date(date_str: str):
@@ -297,7 +217,6 @@ def _parse_date(date_str: str):
         except Exception:
             continue
     return None
-
 
 
 # ── Page 1: Dashboard ─────────────────────────────────────────────────────────
@@ -328,7 +247,6 @@ def page_home():
     ].shape[0]) if not df.empty else 0
     n_archived   = len(df_arc)
 
-    # ── KPI row ───────────────────────────────────────────────────────────────
     k1, k2, k3, k4, k5 = st.columns(5)
     k1.metric("🗂 Total Active",    n_total)
     k2.metric("🆕 New",             n_new)
@@ -338,14 +256,12 @@ def page_home():
 
     st.markdown("<div style='margin:12px 0 4px'></div>", unsafe_allow_html=True)
 
-    # ── Queue cards ───────────────────────────────────────────────────────────
     st.markdown(
         f"<p style='font-size:15px;font-weight:600;color:{GRAB_DARK};margin:0 0 8px'>Cases by Queue"
         " <span style='font-size:12px;color:#888;font-weight:400'>— click to open</span></p>",
         unsafe_allow_html=True,
     )
     queue_counts = df["queue"].value_counts().to_dict() if not df.empty else {}
-    # per-status counts per queue
     queue_status = {}
     if not df.empty:
         for q in QUEUES:
@@ -382,25 +298,13 @@ def page_home():
 
     st.divider()
 
-    # ── Controls aligned with charts below ────────────────────────────────────
     ctrl_l, ctrl_r = st.columns(2)
     with ctrl_l:
-        selected_queues = st.multiselect(
-            "Compare queues",
-            options=QUEUES,
-            default=QUEUES,
-            key="queue_slicer",
-        )
+        selected_queues = st.multiselect("Compare queues", options=QUEUES, default=QUEUES, key="queue_slicer")
     with ctrl_r:
-        cutoff_days = st.selectbox(
-            "Trend period",
-            [7, 14, 30, 60, 90],
-            index=2,
-            format_func=lambda x: f"Last {x} days",
-            key="trend_days",
-        )
+        cutoff_days = st.selectbox("Trend period", [7, 14, 30, 60, 90], index=2,
+                                   format_func=lambda x: f"Last {x} days", key="trend_days")
 
-    # ── Charts — equal 50/50 columns, fixed height ────────────────────────────
     chart_l, chart_r = st.columns(2)
     CHART_H = 300
 
@@ -431,9 +335,7 @@ def page_home():
                         .size().unstack(fill_value=0)
                         .reindex(columns=selected_queues, fill_value=0)
                     )
-                    pivot = pivot.reindex(
-                        pd.date_range(cutoff, date.today()).date, fill_value=0
-                    )
+                    pivot = pivot.reindex(pd.date_range(cutoff, date.today()).date, fill_value=0)
                     st.line_chart(pivot, height=CHART_H)
                 else:
                     st.info("No data in selected period.")
@@ -443,7 +345,6 @@ def page_home():
     with chart_r:
         tab3, tab4 = st.tabs(["📈 Case Trends", "⏱ Avg Age (days)"])
         with tab3:
-            # Multi-line: New Cases, Resolved Cases (Completed), Active Cases total
             if not df.empty or not df_arc.empty:
                 all_cases = pd.concat([df, df_arc], ignore_index=True) if not df_arc.empty else df.copy()
                 all_cases["_date"] = all_cases["date_received"].apply(_parse_date)
@@ -452,25 +353,16 @@ def page_home():
                 all_cases = all_cases[all_cases["_date"] >= cutoff_t]
                 date_range = pd.date_range(cutoff_t, date.today()).date
                 if not all_cases.empty:
-                    new_by_day = (
-                        all_cases.groupby("_date").size()
-                        .reindex(date_range, fill_value=0)
-                        .rename("New Cases")
-                    )
+                    new_by_day = all_cases.groupby("_date").size().reindex(date_range, fill_value=0).rename("New Cases")
                     resolved_by_day = (
                         all_cases[all_cases["status"] == "Completed"]
-                        .groupby("_date").size()
-                        .reindex(date_range, fill_value=0)
-                        .rename("Resolved Cases")
+                        .groupby("_date").size().reindex(date_range, fill_value=0).rename("Resolved Cases")
                     )
                     active_by_day = (
                         all_cases[all_cases["status"].isin(["New", "In Progress"])]
-                        .groupby("_date").size()
-                        .reindex(date_range, fill_value=0)
-                        .rename("Active Cases")
+                        .groupby("_date").size().reindex(date_range, fill_value=0).rename("Active Cases")
                     )
-                    trends = pd.concat([new_by_day, resolved_by_day, active_by_day], axis=1)
-                    st.line_chart(trends, height=CHART_H)
+                    st.line_chart(pd.concat([new_by_day, resolved_by_day, active_by_day], axis=1), height=CHART_H)
                 else:
                     st.info("No data in selected period.")
             else:
@@ -483,15 +375,13 @@ def page_home():
                 dfa["age"] = dfa["_date"].apply(lambda d: (date.today() - d).days)
                 avg_df = (
                     dfa.groupby("queue")["age"].mean()
-                    .reindex(QUEUES).fillna(0).round(1)
-                    .reset_index()
+                    .reindex(QUEUES).fillna(0).round(1).reset_index()
                 )
                 avg_df.columns = ["Queue", "Avg Days Open"]
                 st.bar_chart(avg_df.set_index("Queue"), color=GRAB_GREEN, height=CHART_H)
             else:
                 st.info("No active cases.")
 
-    # ── Latest 5 new cases ────────────────────────────────────────────────────
     st.divider()
     st.markdown(f"<p style='font-size:15px;font-weight:600;color:{GRAB_DARK}'>🕐 Latest 5 New Cases</p>",
                 unsafe_allow_html=True)
@@ -507,8 +397,7 @@ def page_home():
                     "case_id": "Case ID", "date_received": "Received",
                     "sender": "From", "subject": "Subject", "queue": "Queue",
                 }),
-                use_container_width=True,
-                hide_index=True,
+                use_container_width=True, hide_index=True,
             )
     else:
         st.info("No active cases yet.")
@@ -528,8 +417,6 @@ def page_cases():
 
     df = load_active_cases()
 
-    # ── Sidebar filters ───────────────────────────────────────────────────────
-    # Use prefixed keys so no stale session values from previous app versions bleed in
     if "f_date_from" not in st.session_state:
         st.session_state["f_date_from"] = date(2020, 1, 1)
     if "f_date_to" not in st.session_state:
@@ -555,7 +442,6 @@ def page_cases():
             st.session_state["f_date_to"]   = date.today()
             st.rerun()
 
-    # ── Apply filters ─────────────────────────────────────────────────────────
     filtered = df.copy() if not df.empty else df
 
     if not filtered.empty:
@@ -593,7 +479,6 @@ def page_cases():
         st.info("No cases match the current filters.")
         return
 
-    # ── Pagination controls ───────────────────────────────────────────────────
     n_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
     if "cases_page" not in st.session_state:
         st.session_state["cases_page"] = 1
@@ -602,23 +487,6 @@ def page_cases():
     page  = st.session_state["cases_page"]
     start = (page - 1) * PAGE_SIZE
     page_df = filtered.iloc[start: start + PAGE_SIZE]
-
-    st.markdown(f"""
-    <style>
-    div[data-testid="stButton"] > button[data-testid="pg_prev"],
-    div[data-testid="stButton"] > button[data-testid="pg_next"] {{
-        width: 110px !important;
-        min-width: 110px !important;
-        max-width: 110px !important;
-        height: 36px !important;
-        font-size: 13px !important;
-        padding: 0 !important;
-        text-align: center !important;
-        white-space: nowrap !important;
-        overflow: hidden !important;
-    }}
-    </style>
-    """, unsafe_allow_html=True)
 
     hdr_l, hdr_r = st.columns([2, 1])
     hdr_l.markdown(
@@ -642,7 +510,6 @@ def page_cases():
 
     st.markdown("<div style='margin-bottom:8px'></div>", unsafe_allow_html=True)
 
-    # ── Case cards ────────────────────────────────────────────────────────────
     for _, row in page_df.iterrows():
         cid          = row["case_id"]
         status       = row["status"]
@@ -675,31 +542,24 @@ def page_cases():
         </div>
         """, unsafe_allow_html=True)
 
-        # Action buttons row
         b1, b2, b3, b4 = st.columns([2, 1.5, 1.5, 1.5])
         with b1:
             qi = QUEUES.index(row["queue"]) if row["queue"] in QUEUES else 0
-            nq = st.selectbox(
-                "Queue", QUEUES, index=qi,
-                key=f"rq_{cid}", label_visibility="collapsed",
-            )
+            nq = st.selectbox("Queue", QUEUES, index=qi, key=f"rq_{cid}", label_visibility="collapsed")
             if nq != row["queue"]:
                 update_case(cid, queue=nq)
-                sync_to_sheet_async()
                 st.cache_data.clear()
                 st.rerun()
         with b2:
             if st.button("👤 Assign to Me", key=f"a_{cid}", type="primary", use_container_width=True):
                 now = datetime.now(TZ).strftime("%d/%m/%Y %H:%M")
                 update_case(cid, status="In Progress", assigned_to=logged_in_user, assigned_at=now)
-                sync_to_sheet_async()
                 st.cache_data.clear()
                 st.rerun()
         with b3:
             if st.button("✅ Mark Complete", key=f"c_{cid}", use_container_width=True):
                 now = datetime.now(TZ).strftime("%d/%m/%Y %H:%M")
                 update_case(cid, status="Completed", completed_at=now)
-                sync_to_sheet_async()
                 st.cache_data.clear()
                 st.rerun()
         with b4:
@@ -708,7 +568,6 @@ def page_cases():
                                use_container_width=True, key=f"ve_{cid}")
 
         st.markdown("<div style='margin-bottom:12px'></div>", unsafe_allow_html=True)
-
 
 
 # ── Page 3: Archive ───────────────────────────────────────────────────────────
@@ -725,6 +584,13 @@ def page_archive():
 
     df = load_archived_cases()
     st.metric("Total Archived Cases", len(df))
+
+    if not df.empty:
+        if st.button("🗂 Archive Old Completed Cases Now", use_container_width=False):
+            count = archive_old_completed()
+            st.success(f"Archived {count} case(s).")
+            st.cache_data.clear()
+            st.rerun()
 
     if df.empty:
         st.info("No archived cases yet.")
@@ -743,8 +609,6 @@ def page_archive():
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
-init_db()
-
 pg = st.navigation([
     st.Page(page_home,    title="Dashboard", icon="📊"),
     st.Page(page_cases,   title="Cases",     icon="📋"),
