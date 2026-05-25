@@ -382,15 +382,15 @@ def page_home():
                     '<span style="font-size:28px;font-weight:700;line-height:1.2;color:#00802E">' + count + '</span>' +
                     '<span style="font-size:12px;font-weight:600">' + name + '</span>' +
                     '<span style="font-size:11px;color:#888;margin-top:2px">' + stats + '</span>';
-                btn.style.height = 'auto';
-                btn.style.minHeight = '110px';
+                btn.style.height = '160px';
+                btn.style.minHeight = '160px';
                 btn.style.display = 'flex';
                 btn.style.flexDirection = 'column';
                 btn.style.alignItems = 'center';
                 btn.style.justifyContent = 'center';
-                btn.style.gap = '2px';
+                btn.style.gap = '4px';
                 btn.style.borderRadius = '12px';
-                btn.style.padding = '12px 8px';
+                btn.style.padding = '16px 8px';
                 btn.style.lineHeight = '1';
             }});
         }}
