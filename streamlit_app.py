@@ -398,9 +398,9 @@ def page_home():
                 const stats    = lines[2] || '';    // e.g. "🆕 5  ⏳ 2  ✅ 1"
 
                 btn.innerHTML =
-                    '<span style="font-size:14px;font-weight:700;line-height:1.3;text-align:center">' + nameLine + '</span>' +
-                    '<span style="font-size:38px;font-weight:900;line-height:1.1;color:#00802E;margin:4px 0">' + count + '</span>' +
-                    '<span style="font-size:13px;color:#555;font-weight:500;text-align:center;margin-top:2px">' + stats + '</span>';
+                    '<span style="display:block;font-size:14px;font-weight:700;line-height:1.3;text-align:center">' + nameLine + '</span>' +
+                    '<span style="display:block;font-size:38px;font-weight:900;line-height:1.1;color:#00802E;margin:6px 0 4px">' + count + '</span>' +
+                    '<span style="display:block;font-size:13px;color:#555;font-weight:500;text-align:center">' + stats + '</span>';
             }});
         }}
         styleCards();
