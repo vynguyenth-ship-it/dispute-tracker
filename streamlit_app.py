@@ -355,7 +355,7 @@ def page_home():
             st.query_params["status"] = "Rejected"
             st.switch_page(cases_page)
 
-    # Inject styles for queue card buttons via JS (CSS cannot target by Streamlit key)
+    # Inject styles for queue card buttons via JS
     _all_card_labels = QUEUES + ["Rejected"]
     _card_labels_js  = str(_all_card_labels).replace("'", '"')
     _components.html(f"""
@@ -366,21 +366,37 @@ def page_home():
             const buttons = window.parent.document.querySelectorAll('button');
             buttons.forEach(btn => {{
                 const txt = btn.innerText || '';
-                if (LABELS.some(l => txt.includes(l))) {{
-                    btn.style.height = 'auto';
-                    btn.style.minHeight = '90px';
-                    btn.style.whiteSpace = 'pre-wrap';
-                    btn.style.lineHeight = '1.7';
-                    btn.style.flexDirection = 'column';
-                    btn.style.alignItems = 'center';
-                    btn.style.justifyContent = 'center';
-                    btn.style.borderRadius = '12px';
-                    btn.style.padding = '16px';
-                }}
+                if (!LABELS.some(l => txt.includes(l))) return;
+                // Only rebuild once
+                if (btn.dataset.styled) return;
+                btn.dataset.styled = '1';
+                const lines = txt.trim().split('\\n').map(s => s.trim()).filter(Boolean);
+                // lines: [icon, count, name, stats...]
+                if (lines.length < 3) return;
+                const icon  = lines[0];
+                const count = lines[1];
+                const name  = lines[2];
+                const stats = lines.slice(3).join('  ');
+                btn.innerHTML =
+                    '<span style="font-size:22px;line-height:1">' + icon + '</span>' +
+                    '<span style="font-size:28px;font-weight:700;line-height:1.2;color:#00802E">' + count + '</span>' +
+                    '<span style="font-size:12px;font-weight:600">' + name + '</span>' +
+                    '<span style="font-size:11px;color:#888;margin-top:2px">' + stats + '</span>';
+                btn.style.height = 'auto';
+                btn.style.minHeight = '110px';
+                btn.style.display = 'flex';
+                btn.style.flexDirection = 'column';
+                btn.style.alignItems = 'center';
+                btn.style.justifyContent = 'center';
+                btn.style.gap = '2px';
+                btn.style.borderRadius = '12px';
+                btn.style.padding = '12px 8px';
+                btn.style.lineHeight = '1';
             }});
         }}
         styleCards();
-        setTimeout(styleCards, 300);
+        setTimeout(styleCards, 200);
+        setTimeout(styleCards, 800);
     }})();
     </script>
     """, height=0)
