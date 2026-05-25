@@ -730,8 +730,12 @@ def page_archive():
         return
 
     display_cols = ["case_id", "date_received", "sender", "subject", "queue", "completed_at"]
+    out = df[display_cols].copy()
+    out["completed_at"] = out["completed_at"].apply(
+        lambda v: str(v)[:10] if pd.notna(v) and str(v).strip() else ""
+    )
     st.dataframe(
-        df[display_cols].rename(columns={
+        out.rename(columns={
             "case_id": "Case ID", "date_received": "Date Received",
             "sender": "Sender", "subject": "Subject",
             "queue": "Queue", "completed_at": "Completed At",
