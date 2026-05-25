@@ -426,12 +426,15 @@ def archive_old_completed() -> int:
     rows = load_cases(CONFIG["SHEET_TAB_NAME"])
     archived = 0
     for row in rows:
-        if row.get("status") != "Completed":
+        status = row.get("status", "")
+        if status not in ("Completed", "Rejected"):
             continue
-        completed_dt = _parse_completed_at(row.get("completed_at", ""))
-        if completed_dt is None:
+        # Use completed_at for Completed; fall back to assigned_at for Rejected
+        timestamp_raw = row.get("completed_at") or row.get("assigned_at", "")
+        closed_dt = _parse_completed_at(timestamp_raw)
+        if closed_dt is None:
             continue
-        if completed_dt < cutoff:
+        if closed_dt < cutoff:
             archive_case(row["case_id"])
             archived += 1
     log.info(f"Archived {archived} cases older than {CONFIG['ARCHIVE_AFTER_DAYS']} day(s).")

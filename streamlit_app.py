@@ -21,7 +21,7 @@ from dispute_tracker import (
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 QUEUES   = ["Dispute", "Update Details", "Invoice", "Internal Invoice", "Others"]
-STATUSES = ["New", "In Progress", "Completed"]
+STATUSES = ["New", "In Progress", "Completed", "Rejected"]
 REJECT_REASONS = ["Duplicated", "Not AR case", "More detail required"]
 GROUP_EMAIL = CONFIG["GROUP_EMAIL"]
 PAGE_SIZE   = 30
@@ -309,16 +309,22 @@ def page_home():
                 "New":         int((qdf["status"] == "New").sum()),
                 "In Progress": int((qdf["status"] == "In Progress").sum()),
                 "Completed":   int((qdf["status"] == "Completed").sum()),
+                "Rejected":    int((qdf["status"] == "Rejected").sum()),
             }
     else:
-        queue_status = {q: {"New": 0, "In Progress": 0, "Completed": 0} for q in QUEUES}
+        queue_status = {q: {"New": 0, "In Progress": 0, "Completed": 0, "Rejected": 0} for q in QUEUES}
+
+    # Summary rejected card (all queues combined)
+    n_rejected = int((df["status"] == "Rejected").sum()) if not df.empty else 0
 
     cases_page = st.Page(page_cases, title="Cases", icon="📋")
-    cols = st.columns(5)
-    for i, q in enumerate(QUEUES):
+
+    # Row 1: first 3 queue cards
+    row1 = st.columns(3)
+    for i, q in enumerate(QUEUES[:3]):
         total_q = queue_counts.get(q, 0)
         qs = queue_status[q]
-        with cols[i]:
+        with row1[i]:
             if st.button(
                 f"{QUEUE_ICONS.get(q, '')}\n{total_q}\n{q}\n🆕 {qs['New']}  ⏳ {qs['In Progress']}  ✅ {qs['Completed']}",
                 key=f"qcard_{q}",
@@ -327,17 +333,40 @@ def page_home():
                 st.query_params["queue"] = q
                 st.switch_page(cases_page)
 
+    # Row 2: last 2 queue cards + Rejected summary card
+    row2 = st.columns(3)
+    for i, q in enumerate(QUEUES[3:]):
+        total_q = queue_counts.get(q, 0)
+        qs = queue_status[q]
+        with row2[i]:
+            if st.button(
+                f"{QUEUE_ICONS.get(q, '')}\n{total_q}\n{q}\n🆕 {qs['New']}  ⏳ {qs['In Progress']}  ✅ {qs['Completed']}",
+                key=f"qcard_{q}",
+                use_container_width=True,
+            ):
+                st.query_params["queue"] = q
+                st.switch_page(cases_page)
+    with row2[2]:
+        if st.button(
+            f"🚫\n{n_rejected}\nRejected\n(all queues)",
+            key="qcard_Rejected",
+            use_container_width=True,
+        ):
+            st.query_params["status"] = "Rejected"
+            st.switch_page(cases_page)
+
     # Inject styles for queue card buttons via JS (CSS cannot target by Streamlit key)
-    _queue_names_js = str(QUEUES).replace("'", '"')
+    _all_card_labels = QUEUES + ["Rejected"]
+    _card_labels_js  = str(_all_card_labels).replace("'", '"')
     _components.html(f"""
     <script>
     (function() {{
-        const QUEUES = {_queue_names_js};
+        const LABELS = {_card_labels_js};
         function styleCards() {{
             const buttons = window.parent.document.querySelectorAll('button');
             buttons.forEach(btn => {{
                 const txt = btn.innerText || '';
-                if (QUEUES.some(q => txt.includes(q))) {{
+                if (LABELS.some(l => txt.includes(l))) {{
                     btn.style.height = '160px';
                     btn.style.minHeight = '160px';
                     btn.style.whiteSpace = 'pre-wrap';
@@ -486,7 +515,11 @@ def page_cases():
         st.markdown(f"<h3 style='color:{GRAB_GREEN};margin-bottom:12px'>🔍 Filters</h3>",
                     unsafe_allow_html=True)
         search        = st.text_input("Search", placeholder="Case ID, sender, subject...")
-        status_filter = st.multiselect("Status", STATUSES, default=STATUSES)
+        default_status = STATUSES
+        sp = st.query_params.get("status")
+        if sp and sp in STATUSES:
+            default_status = [sp]
+        status_filter = st.multiselect("Status", STATUSES, default=default_status)
         default_queue = []
         qp = st.query_params.get("queue")
         if qp and qp in QUEUES:
