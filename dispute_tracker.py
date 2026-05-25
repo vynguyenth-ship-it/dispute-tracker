@@ -180,7 +180,7 @@ def find_case(case_id: str) -> sqlite3.Row | None:
 _FIELD_COL = {
     "date_received": 1, "sender": 2, "subject": 3, "queue": 4,
     "status": 5, "assigned_to": 6, "assigned_at": 7,
-    "completed_at": 8, "email_link": 9,
+    "completed_at": 8, "email_link": 9, "reject_reason": 10,
 }
 
 
@@ -443,7 +443,7 @@ def archive_old_completed() -> int:
 # ============================================================
 SHEET_COLUMNS = [
     "Case ID", "Date Received", "Sender", "Subject", "Queue",
-    "Status", "Assigned To", "Assigned At", "Completed At", "Email Link",
+    "Status", "Assigned To", "Assigned At", "Completed At", "Email Link", "Reject Reason",
 ]
 
 
@@ -975,12 +975,13 @@ def load_cases(tab_name: str | None = None) -> list[dict]:
         "Subject": "subject", "Queue": "queue", "Status": "status",
         "Assigned To": "assigned_to", "Assigned At": "assigned_at",
         "Completed At": "completed_at", "Email Link": "email_link",
+        "Reject Reason": "reject_reason",
     }
     try:
         service = get_sheets_service()
         result = service.spreadsheets().values().get(
             spreadsheetId=CONFIG["SHEET_ID"],
-            range=f"{tab}!A:J",
+            range=f"{tab}!A:K",
         ).execute()
         values = result.get("values", [])
         if len(values) < 2:

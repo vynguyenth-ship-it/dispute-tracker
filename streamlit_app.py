@@ -1,5 +1,5 @@
 """
-Dispute Case Tracker — Streamlit Web UI
+Dispute Management — Streamlit Web UI
 Data source: Google Sheets (no local SQLite)
 Deploy: streamlit run streamlit_app.py  |  Streamlit Cloud
 """
@@ -45,7 +45,7 @@ STATUS_COLOR = {
 
 # ── Page config & CSS ─────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Dispute Case Tracker",
+    page_title="Dispute Management",
     page_icon="🟢",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -175,7 +175,7 @@ def _require_login():
     <div style="max-width:420px;margin:80px auto;text-align:center;">
         <div style="background:{GRAB_GREEN};border-radius:16px;padding:40px 32px;">
             <div style="font-size:48px;margin-bottom:8px;">🟢</div>
-            <h1 style="color:white;font-size:24px;margin:0 0 4px;">Dispute Case Tracker</h1>
+            <h1 style="color:white;font-size:24px;margin:0 0 4px;">Dispute Management</h1>
             <p style="color:rgba(255,255,255,0.85);font-size:14px;margin:0 0 28px;">
                 account.receivable.vn@grabtaxi.com
             </p>
@@ -265,7 +265,7 @@ def page_home():
     <div style="background:{GRAB_GREEN};border-radius:10px;padding:14px 20px;
                 display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
         <div>
-            <span style="color:white;font-size:20px;font-weight:700;">📊 Dispute Case Tracker</span>
+            <span style="color:white;font-size:20px;font-weight:700;">📊 Dispute Management</span>
             <span style="color:rgba(255,255,255,0.8);font-size:12px;margin-left:12px;">{GROUP_EMAIL}</span>
         </div>
         <span style="color:rgba(255,255,255,0.9);font-size:13px;">👤 {logged_in_user}</span>
@@ -578,12 +578,20 @@ def page_cases():
         sender_safe  = str(row["sender"]).replace("<", "&lt;").replace(">", "&gt;")
         date_short   = str(row["date_received"])[:10] if row.get("date_received") else ""
 
-        # Assigned name shown on right side of badges row
+        def _esc(v): return str(v).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
         assigned_html = ""
         if row.get("assigned_to"):
             assigned_html = (
                 f'<span style="font-size:11px;color:#666;margin-left:auto;">'
-                f'👤 {row["assigned_to"]} · {row["assigned_at"]}</span>'
+                f'👤 {_esc(row["assigned_to"])} · {_esc(row.get("assigned_at",""))}</span>'
+            )
+
+        reject_html = ""
+        if status == "Rejected" and row.get("reject_reason"):
+            reject_html = (
+                f'<span style="font-size:11px;color:#E74C3C;margin-left:4px;">'
+                f'🚫 {_esc(row["reject_reason"])}</span>'
             )
 
         st.markdown(f"""
@@ -591,17 +599,17 @@ def page_cases():
                     border-radius:0 8px 8px 0;padding:12px 16px 8px;
                     border:1px solid #e8e8e8;border-left:4px solid {sc};
                     margin-bottom:2px;">
-            <div style="font-size:11px;color:#999;font-weight:500;letter-spacing:.3px">{cid}</div>
+            <div style="font-size:11px;color:#999;font-weight:500;letter-spacing:.3px">{_esc(cid)}</div>
             <div style="font-size:14px;font-weight:600;color:#1a1a1a;margin:3px 0 2px;
                         line-height:1.3">{subject_safe}</div>
             <div style="font-size:12px;color:#666;margin-bottom:7px">{sender_safe}</div>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
                 <span style="background:{GRAB_LIGHT};color:{GRAB_DARK};padding:2px 10px;
-                             border-radius:12px;font-size:11px;font-weight:500">{row['queue']}</span>
+                             border-radius:12px;font-size:11px;font-weight:500">{_esc(row['queue'])}</span>
                 <span style="background:{sc}22;color:{sc};padding:2px 10px;
                              border-radius:12px;font-size:11px;font-weight:500">{status}</span>
                 <span style="color:#aaa;font-size:11px">{date_short}</span>
-                {assigned_html}
+                {reject_html}{assigned_html}
             </div>
         </div>
         """, unsafe_allow_html=True)
@@ -640,7 +648,7 @@ def page_cases():
                     label_visibility="collapsed",
                 )
                 if st.button("Confirm", key=f"rej_confirm_{cid}", type="primary", use_container_width=True):
-                    _apply_action(cid, status="Rejected", queue=reason)
+                    _apply_action(cid, status="Rejected", reject_reason=reason)
                     st.session_state[show_reject_key] = False
 
         # View email
