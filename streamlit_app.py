@@ -378,20 +378,18 @@ def page_home():
                 const name  = lines[2];
                 const stats = lines.slice(3).join('  ');
                 btn.innerHTML =
-                    '<span style="font-size:22px;line-height:1">' + icon + '</span>' +
-                    '<span style="font-size:36px;font-weight:800;line-height:1.2;color:#00802E">' + count + '</span>' +
-                    '<span style="font-size:12px;font-weight:600">' + name + '</span>' +
-                    '<span style="font-size:11px;color:#888;margin-top:2px">' + stats + '</span>';
-                btn.style.height = '200px';
-                btn.style.minHeight = '200px';
+                    '<span style="display:block;font-size:24px;line-height:1;margin-bottom:6px">' + icon + '</span>' +
+                    '<span style="display:block;font-size:42px;font-weight:800;line-height:1;color:#00802E;margin-bottom:6px">' + count + '</span>' +
+                    '<span style="display:block;font-size:13px;font-weight:600;margin-bottom:8px">' + name + '</span>' +
+                    '<span style="display:block;font-size:11px;color:#888">' + stats + '</span>';
+                btn.style.height = '220px';
+                btn.style.minHeight = '220px';
                 btn.style.display = 'flex';
                 btn.style.flexDirection = 'column';
                 btn.style.alignItems = 'center';
                 btn.style.justifyContent = 'center';
-                btn.style.gap = '4px';
                 btn.style.borderRadius = '12px';
-                btn.style.padding = '16px 8px';
-                btn.style.lineHeight = '1';
+                btn.style.padding = '20px 8px';
             }});
         }}
         styleCards();
