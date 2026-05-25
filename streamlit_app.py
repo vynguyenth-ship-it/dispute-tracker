@@ -9,6 +9,8 @@ import threading
 import urllib.parse
 from datetime import datetime, date, timedelta
 
+import streamlit.components.v1 as _components
+
 import pandas as pd
 import streamlit as st
 
@@ -112,29 +114,6 @@ div[data-testid="stButton"] > button[kind="primary"]:hover {{ background: {GRAB_
 }}
 hr {{ border-color: #e8e8e8 !important; }}
 
-/* ── Queue card buttons — tall, styled like cards ── */
-div[data-testid="stButton"] > button[data-testid^="qcard_"] {{
-    height: 148px !important;
-    white-space: pre-wrap !important;
-    line-height: 1.6 !important;
-    font-size: 13px !important;
-    display: flex !important;
-    flex-direction: column !important;
-    align-items: center !important;
-    justify-content: center !important;
-    border: 1.5px solid {GRAB_GREEN} !important;
-    border-radius: 12px !important;
-    padding: 12px !important;
-}}
-
-/* Reject button — red style */
-div[data-testid="stButton"] > button[data-testid^="rej_"] {{
-    border-color: #E74C3C !important;
-    color: #E74C3C !important;
-}}
-div[data-testid="stButton"] > button[data-testid^="rej_"]:hover {{
-    background: #fdecea !important;
-}}
 </style>
 """
 st.markdown(THEME_CSS, unsafe_allow_html=True)
@@ -340,7 +319,6 @@ def page_home():
         total_q = queue_counts.get(q, 0)
         qs = queue_status[q]
         with cols[i]:
-            # Single clickable button styled as a card
             if st.button(
                 f"{QUEUE_ICONS.get(q, '')}\n{total_q}\n{q}\n🆕 {qs['New']}  ⏳ {qs['In Progress']}  ✅ {qs['Completed']}",
                 key=f"qcard_{q}",
@@ -348,6 +326,35 @@ def page_home():
             ):
                 st.query_params["queue"] = q
                 st.switch_page(cases_page)
+
+    # Inject styles for queue card buttons via JS (CSS cannot target by Streamlit key)
+    _queue_names_js = str(QUEUES).replace("'", '"')
+    _components.html(f"""
+    <script>
+    (function() {{
+        const QUEUES = {_queue_names_js};
+        function styleCards() {{
+            const buttons = window.parent.document.querySelectorAll('button');
+            buttons.forEach(btn => {{
+                const txt = btn.innerText || '';
+                if (QUEUES.some(q => txt.includes(q))) {{
+                    btn.style.height = '160px';
+                    btn.style.minHeight = '160px';
+                    btn.style.whiteSpace = 'pre-wrap';
+                    btn.style.lineHeight = '1.7';
+                    btn.style.flexDirection = 'column';
+                    btn.style.alignItems = 'center';
+                    btn.style.justifyContent = 'center';
+                    btn.style.borderRadius = '12px';
+                    btn.style.padding = '16px';
+                }}
+            }});
+        }}
+        styleCards();
+        setTimeout(styleCards, 300);
+    }})();
+    </script>
+    """, height=0)
 
     st.divider()
 
