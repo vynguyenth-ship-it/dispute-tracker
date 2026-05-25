@@ -357,50 +357,61 @@ def page_home():
         ):
             _go_status("Rejected")
 
-    # JS: parse button text with regex, rebuild innerHTML, force column layout
+    # JS: style queue cards — runs on interval to survive Streamlit rerenders
     _card_labels_js = str(QUEUES + ["Rejected"]).replace("'", '"')
     _components.html(f"""
     <script>
     (function() {{
         const LABELS = {_card_labels_js};
+
         function styleCards() {{
             window.parent.document.querySelectorAll('button').forEach(function(btn) {{
-                if (btn.dataset.qcard) return;
-                var txt = (btn.innerText || '').trim();
-                if (!LABELS.some(function(l) {{ return txt.indexOf(l) >= 0; }})) return;
-
-                btn.dataset.qcard = '1';
-
-                // Label format: "icon name\ncount\nstats"
-                // Use longest matching label to avoid "Invoice" matching "Internal Invoice"
+                // Match by checking if the button text contains any known label
+                var txt = (btn.innerText || btn.textContent || '').trim();
+                // Use longest match to avoid "Invoice" matching "Internal Invoice"
                 var name = LABELS
                     .filter(function(l) {{ return txt.indexOf(l) >= 0; }})
-                    .sort(function(a,b) {{ return b.length - a.length; }})[0] || '';
-                var numM  = txt.match(/(\\d+)/);
-                var count = numM ? numM[1] : '0';
-                // First line = "icon name", stats = everything after count
-                var firstLine = txt.slice(0, txt.indexOf(count)).trim();
-                var after     = txt.slice(txt.indexOf(count) + count.length).trim();
+                    .sort(function(a, b) {{ return b.length - a.length; }})[0];
+                if (!name) return;
+
+                // Find the total count: first number that appears before the stats emojis
+                // Stats line always starts with 🆕 or ( — find count as first number before that
+                var statsStart = txt.search(/🆕|\\(/);
+                var searchTxt  = statsStart > 0 ? txt.slice(0, statsStart) : txt;
+                var numM       = searchTxt.match(/(\\d+)/);
+                if (!numM) return;
+                var count      = numM[1];
+
+                // Line 1: everything before the count (icon + name)
+                var line1 = txt.slice(0, txt.indexOf(count)).trim();
+                // Line 3: everything after the count
+                var line3 = txt.slice(txt.indexOf(count) + count.length).trim();
+
+                // Skip if already styled with same data (avoid flicker)
+                if (btn.dataset.qcard === line1 + count) return;
+                btn.dataset.qcard = line1 + count;
 
                 btn.innerHTML =
-                    '<span style="display:block;font-size:14px;font-weight:700;line-height:1.3;margin-bottom:6px;text-align:center">' + firstLine + '</span>' +
-                    '<span style="display:block;font-size:44px;font-weight:900;line-height:1;color:#00802E;margin-bottom:6px">' + count + '</span>' +
-                    '<span style="display:block;font-size:12px;color:#555;text-align:center">' + after + '</span>';
+                    '<span style="display:block;font-size:14px;font-weight:700;text-align:center;line-height:1.4;margin-bottom:4px">' + line1 + '</span>' +
+                    '<span style="display:block;font-size:46px;font-weight:900;line-height:1;color:#00802E;margin-bottom:4px">' + count + '</span>' +
+                    '<span style="display:block;font-size:12px;color:#555;text-align:center;line-height:1.5">' + line3 + '</span>';
 
-                btn.style.setProperty('height', '190px', 'important');
-                btn.style.setProperty('min-height', '190px', 'important');
-                btn.style.setProperty('display', 'flex', 'important');
-                btn.style.setProperty('flex-direction', 'column', 'important');
-                btn.style.setProperty('align-items', 'center', 'important');
-                btn.style.setProperty('justify-content', 'center', 'important');
-                btn.style.setProperty('border-radius', '12px', 'important');
-                btn.style.setProperty('padding', '16px 8px', 'important');
-                btn.style.setProperty('white-space', 'normal', 'important');
+                btn.style.setProperty('height',           '160px',  'important');
+                btn.style.setProperty('min-height',       '160px',  'important');
+                btn.style.setProperty('display',          'flex',   'important');
+                btn.style.setProperty('flex-direction',   'column', 'important');
+                btn.style.setProperty('align-items',      'center', 'important');
+                btn.style.setProperty('justify-content',  'center', 'important');
+                btn.style.setProperty('border-radius',    '12px',   'important');
+                btn.style.setProperty('padding',          '14px 8px', 'important');
+                btn.style.setProperty('white-space',      'normal', 'important');
+                btn.style.setProperty('line-height',      '1',      'important');
             }});
         }}
+
         styleCards();
-        setTimeout(styleCards, 300);
-        setTimeout(styleCards, 1000);
+        // Re-run periodically to catch Streamlit rerenders
+        setInterval(styleCards, 800);
     }})();
     </script>
     """, height=0)
