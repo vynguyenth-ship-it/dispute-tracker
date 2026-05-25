@@ -5,6 +5,7 @@ Deploy: streamlit run streamlit_app.py  |  Streamlit Cloud
 """
 import base64
 import json as _json
+import threading
 import urllib.parse
 from datetime import datetime, date, timedelta
 
@@ -19,6 +20,7 @@ from dispute_tracker import (
 # ── Constants ─────────────────────────────────────────────────────────────────
 QUEUES   = ["Dispute", "Update Details", "Invoice", "Internal Invoice", "Others"]
 STATUSES = ["New", "In Progress", "Completed"]
+REJECT_REASONS = ["Duplicated", "Not AR case", "More detail required"]
 GROUP_EMAIL = CONFIG["GROUP_EMAIL"]
 PAGE_SIZE   = 30
 
@@ -35,7 +37,9 @@ STATUS_COLOR = {
     "New":         "#F5A623",
     "In Progress": "#4A90D9",
     "Completed":   "#00B14F",
+    "Rejected":    "#E74C3C",
 }
+
 
 # ── Page config & CSS ─────────────────────────────────────────────────────────
 st.set_page_config(
@@ -107,6 +111,30 @@ div[data-testid="stButton"] > button[kind="primary"]:hover {{ background: {GRAB_
     border: 1px solid #e8e8e8 !important; border-radius: 8px !important; background: #ffffff !important;
 }}
 hr {{ border-color: #e8e8e8 !important; }}
+
+/* ── Queue card buttons — tall, styled like cards ── */
+div[data-testid="stButton"] > button[data-testid^="qcard_"] {{
+    height: 148px !important;
+    white-space: pre-wrap !important;
+    line-height: 1.6 !important;
+    font-size: 13px !important;
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: center !important;
+    justify-content: center !important;
+    border: 1.5px solid {GRAB_GREEN} !important;
+    border-radius: 12px !important;
+    padding: 12px !important;
+}}
+
+/* Reject button — red style */
+div[data-testid="stButton"] > button[data-testid^="rej_"] {{
+    border-color: #E74C3C !important;
+    color: #E74C3C !important;
+}}
+div[data-testid="stButton"] > button[data-testid^="rej_"]:hover {{
+    background: #fdecea !important;
+}}
 </style>
 """
 st.markdown(THEME_CSS, unsafe_allow_html=True)
@@ -183,9 +211,36 @@ def _require_login():
     st.stop()
 
 
+# ── Optimistic update helpers ─────────────────────────────────────────────────
+def _apply_action(cid: str, **fields):
+    """Update session state immediately, write to sheet in background thread."""
+    if "optimistic" not in st.session_state:
+        st.session_state["optimistic"] = {}
+    st.session_state["optimistic"][cid] = {
+        **st.session_state["optimistic"].get(cid, {}),
+        **fields,
+    }
+    threading.Thread(target=update_case, args=(cid,), kwargs=fields, daemon=True).start()
+    st.cache_data.clear()
+    st.rerun()
+
+
+def _get_active_cases() -> pd.DataFrame:
+    """Load cases from sheet (cached) then overlay any optimistic updates."""
+    df = _load_active_cases_cached()
+    optimistic = st.session_state.get("optimistic", {})
+    if optimistic:
+        df = df.copy()
+        for cid, fields in optimistic.items():
+            mask = df["case_id"] == cid
+            for k, v in fields.items():
+                df.loc[mask, k] = v
+    return df
+
+
 # ── Data helpers ──────────────────────────────────────────────────────────────
 @st.cache_data(ttl=60)
-def load_active_cases() -> pd.DataFrame:
+def _load_active_cases_cached() -> pd.DataFrame:
     try:
         rows = load_cases(CONFIG["SHEET_TAB_NAME"])
     except Exception as e:
@@ -201,7 +256,11 @@ def load_active_cases() -> pd.DataFrame:
 
 @st.cache_data(ttl=60)
 def load_archived_cases() -> pd.DataFrame:
-    rows = load_cases(CONFIG["ARCHIVE_TAB_NAME"])
+    try:
+        rows = load_cases(CONFIG["ARCHIVE_TAB_NAME"])
+    except Exception as e:
+        st.error(f"Sheet load error: {e}")
+        rows = []
     if not rows:
         return pd.DataFrame(columns=[
             "case_id", "date_received", "sender", "subject", "queue",
@@ -234,7 +293,7 @@ def page_home():
     </div>
     """, unsafe_allow_html=True)
 
-    df     = load_active_cases()
+    df     = _get_active_cases()
     df_arc = load_archived_cases()
 
     today_str    = datetime.now(TZ).strftime("%d/%m/%Y")
@@ -258,9 +317,10 @@ def page_home():
 
     st.markdown(
         f"<p style='font-size:15px;font-weight:600;color:{GRAB_DARK};margin:0 0 8px'>Cases by Queue"
-        " <span style='font-size:12px;color:#888;font-weight:400'>— click to open</span></p>",
+        " <span style='font-size:12px;color:#888;font-weight:400'>— click a card to filter</span></p>",
         unsafe_allow_html=True,
     )
+
     queue_counts = df["queue"].value_counts().to_dict() if not df.empty else {}
     queue_status = {}
     if not df.empty:
@@ -280,19 +340,12 @@ def page_home():
         total_q = queue_counts.get(q, 0)
         qs = queue_status[q]
         with cols[i]:
-            st.markdown(f"""
-            <div style="background:white;border:1.5px solid {GRAB_GREEN};border-radius:12px;
-                        padding:18px 14px 10px;text-align:center;min-height:148px;
-                        display:flex;flex-direction:column;align-items:center;gap:2px;">
-                <div style="font-size:26px;line-height:1">{QUEUE_ICONS.get(q,'')}</div>
-                <div style="font-size:36px;font-weight:700;color:{GRAB_GREEN};line-height:1.1">{total_q}</div>
-                <div style="font-size:12px;font-weight:600;color:#222;margin-top:2px">{q}</div>
-                <div style="font-size:11px;color:#888;margin-top:4px;line-height:1.6">
-                    🆕 {qs['New']} &nbsp;·&nbsp; ⏳ {qs['In Progress']} &nbsp;·&nbsp; ✅ {qs['Completed']}
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-            if st.button("Open →", key=f"qcard_{q}", use_container_width=True):
+            # Single clickable button styled as a card
+            if st.button(
+                f"{QUEUE_ICONS.get(q, '')}\n{total_q}\n{q}\n🆕 {qs['New']}  ⏳ {qs['In Progress']}  ✅ {qs['Completed']}",
+                key=f"qcard_{q}",
+                use_container_width=True,
+            ):
                 st.query_params["queue"] = q
                 st.switch_page(cases_page)
 
@@ -415,7 +468,7 @@ def page_cases():
     </div>
     """, unsafe_allow_html=True)
 
-    df = load_active_cases()
+    df = _get_active_cases()
 
     if "f_date_from" not in st.session_state:
         st.session_state["f_date_from"] = date(2020, 1, 1)
@@ -517,10 +570,14 @@ def page_cases():
         subject_safe = str(row["subject"]).replace("<", "&lt;").replace(">", "&gt;")
         sender_safe  = str(row["sender"]).replace("<", "&lt;").replace(">", "&gt;")
         date_short   = str(row["date_received"])[:10] if row.get("date_received") else ""
-        assigned_txt = (
-            f'<div style="font-size:11px;color:#666;margin-top:2px">'
-            f'👤 {row["assigned_to"]} · {row["assigned_at"]}</div>'
-        ) if row.get("assigned_to") else ""
+
+        # Assigned name shown on right side of badges row
+        assigned_html = ""
+        if row.get("assigned_to"):
+            assigned_html = (
+                f'<span style="font-size:11px;color:#666;margin-left:auto;">'
+                f'👤 {row["assigned_to"]} · {row["assigned_at"]}</span>'
+            )
 
         st.markdown(f"""
         <div style="border-left:4px solid {sc};background:white;
@@ -537,34 +594,52 @@ def page_cases():
                 <span style="background:{sc}22;color:{sc};padding:2px 10px;
                              border-radius:12px;font-size:11px;font-weight:500">{status}</span>
                 <span style="color:#aaa;font-size:11px">{date_short}</span>
+                {assigned_html}
             </div>
-            {assigned_txt}
         </div>
         """, unsafe_allow_html=True)
 
-        b1, b2, b3, b4 = st.columns([2, 1.5, 1.5, 1.5])
+        # ── Action buttons ────────────────────────────────────────────────────
+        b1, b2, b3, b4 = st.columns([2, 2, 1.5, 1.5])
+
+        # Queue reclassify
         with b1:
             qi = QUEUES.index(row["queue"]) if row["queue"] in QUEUES else 0
             nq = st.selectbox("Queue", QUEUES, index=qi, key=f"rq_{cid}", label_visibility="collapsed")
             if nq != row["queue"]:
-                update_case(cid, queue=nq)
-                st.cache_data.clear()
-                st.rerun()
+                _apply_action(cid, queue=nq)
+
+        # Toggle: Assign to Me → Mark Complete (single button)
         with b2:
-            if st.button("👤 Assign to Me", key=f"a_{cid}", type="primary", use_container_width=True):
-                now = datetime.now(TZ).strftime("%d/%m/%Y %H:%M")
-                update_case(cid, status="In Progress", assigned_to=logged_in_user, assigned_at=now)
-                st.cache_data.clear()
-                st.rerun()
+            now = datetime.now(TZ).strftime("%d/%m/%Y %H:%M")
+            if status == "New":
+                if st.button("👤 Assign to Me", key=f"act_{cid}", type="primary", use_container_width=True):
+                    _apply_action(cid, status="In Progress", assigned_to=logged_in_user, assigned_at=now)
+            elif status == "In Progress":
+                if st.button("✅ Mark Complete", key=f"act_{cid}", type="primary", use_container_width=True):
+                    _apply_action(cid, status="Completed", completed_at=now)
+            else:
+                st.button("✅ Done", key=f"act_{cid}", disabled=True, use_container_width=True)
+
+        # Reject button with reason dropdown
         with b3:
-            if st.button("✅ Mark Complete", key=f"c_{cid}", use_container_width=True):
-                now = datetime.now(TZ).strftime("%d/%m/%Y %H:%M")
-                update_case(cid, status="Completed", completed_at=now)
-                st.cache_data.clear()
-                st.rerun()
+            show_reject_key = f"show_rej_{cid}"
+            if st.button("🚫 Reject", key=f"rej_{cid}", use_container_width=True):
+                st.session_state[show_reject_key] = not st.session_state.get(show_reject_key, False)
+            if st.session_state.get(show_reject_key):
+                reason = st.selectbox(
+                    "Reason", REJECT_REASONS,
+                    key=f"rej_reason_{cid}",
+                    label_visibility="collapsed",
+                )
+                if st.button("Confirm", key=f"rej_confirm_{cid}", type="primary", use_container_width=True):
+                    _apply_action(cid, status="Rejected", queue=reason)
+                    st.session_state[show_reject_key] = False
+
+        # View email
         with b4:
             if row.get("email_link"):
-                st.link_button("📧 View Email", row["email_link"],
+                st.link_button("📧 Email", row["email_link"],
                                use_container_width=True, key=f"ve_{cid}")
 
         st.markdown("<div style='margin-bottom:12px'></div>", unsafe_allow_html=True)
@@ -585,12 +660,11 @@ def page_archive():
     df = load_archived_cases()
     st.metric("Total Archived Cases", len(df))
 
-    if not df.empty:
-        if st.button("🗂 Archive Old Completed Cases Now", use_container_width=False):
-            count = archive_old_completed()
-            st.success(f"Archived {count} case(s).")
-            st.cache_data.clear()
-            st.rerun()
+    if st.button("🗂 Archive Old Completed Cases Now", use_container_width=False):
+        count = archive_old_completed()
+        st.success(f"Archived {count} case(s).")
+        st.cache_data.clear()
+        st.rerun()
 
     if df.empty:
         st.info("No archived cases yet.")
