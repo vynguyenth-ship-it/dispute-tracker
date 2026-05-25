@@ -574,11 +574,6 @@ def page_cases():
 
     df = _get_active_cases()
 
-    if "f_date_from" not in st.session_state:
-        st.session_state["f_date_from"] = date(2020, 1, 1)
-    if "f_date_to" not in st.session_state:
-        st.session_state["f_date_to"] = date.today()
-
     with st.sidebar:
         st.markdown(f"<h3 style='color:{GRAB_GREEN};margin-bottom:12px'>🔍 Filters</h3>",
                     unsafe_allow_html=True)
@@ -591,14 +586,8 @@ def page_cases():
         status_filter  = st.multiselect("Status", STATUSES, default=default_status)
         default_queue  = [_nav_q] if _nav_q and _nav_q in QUEUES else []
         queue_filter   = st.multiselect("Queue", QUEUES, default=default_queue)
-        st.markdown(f"<p style='color:{GRAB_DARK};font-weight:600;margin:8px 0 0'>Date Received</p>",
-                    unsafe_allow_html=True)
-        date_from = st.date_input("From", key="f_date_from")
-        date_to   = st.date_input("To",   key="f_date_to")
-        sort_by   = st.selectbox("Sort by", ["Newest First", "Oldest First", "By Status", "By Queue"])
+        sort_by        = st.selectbox("Sort by", ["Newest First", "Oldest First", "By Status", "By Queue"])
         if st.button("↺ Reset Filters", use_container_width=True):
-            st.session_state["f_date_from"] = date(2020, 1, 1)
-            st.session_state["f_date_to"]   = date.today()
             st.rerun()
 
     filtered = df.copy() if not df.empty else df
@@ -616,11 +605,6 @@ def page_cases():
             filtered = filtered[filtered["status"].isin(status_filter)]
         if queue_filter:
             filtered = filtered[filtered["queue"].isin(queue_filter)]
-        filtered = filtered.copy()
-        filtered["_date"] = filtered["date_received"].apply(_parse_date)
-        filtered = filtered[filtered["_date"].apply(
-            lambda d: d is not None and date_from <= d <= date_to
-        )]
         if not filtered.empty:
             if sort_by == "Newest First":
                 filtered = filtered.sort_values("case_id", ascending=False)
