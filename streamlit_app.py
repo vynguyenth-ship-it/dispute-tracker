@@ -324,16 +324,23 @@ def _parse_date(date_str: str):
 def page_home():
     logged_in_user = _require_login()
 
-    st.markdown(f"""
-    <div style="background:{GRAB_GREEN};border-radius:10px;padding:14px 20px;
-                display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
-        <div>
-            <span style="color:white;font-size:20px;font-weight:700;">📊 Dispute Management</span>
-            <span style="color:rgba(255,255,255,0.8);font-size:12px;margin-left:12px;">{GROUP_EMAIL}</span>
+    hdr_col, btn_col = st.columns([8, 1])
+    with hdr_col:
+        st.markdown(f"""
+        <div style="background:{GRAB_GREEN};border-radius:10px;padding:14px 20px;
+                    display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+            <div>
+                <span style="color:white;font-size:20px;font-weight:700;">📊 Dispute Management</span>
+                <span style="color:rgba(255,255,255,0.8);font-size:12px;margin-left:12px;">{GROUP_EMAIL}</span>
+            </div>
+            <span style="color:rgba(255,255,255,0.9);font-size:13px;">👤 {logged_in_user}</span>
         </div>
-        <span style="color:rgba(255,255,255,0.9);font-size:13px;">👤 {logged_in_user}</span>
-    </div>
-    """, unsafe_allow_html=True)
+        """, unsafe_allow_html=True)
+    with btn_col:
+        st.markdown("<div style='margin-top:8px'></div>", unsafe_allow_html=True)
+        if st.button("🔄 Refresh", use_container_width=True, help="Fetch latest data from Google Sheets"):
+            _invalidate_cache()
+            st.rerun()
 
     df     = _get_active_cases()
     df_arc = load_archived_cases()
@@ -590,13 +597,20 @@ def page_home():
 def page_cases():
     logged_in_user = _require_login()
 
-    st.markdown(f"""
-    <div style="background:{GRAB_GREEN};border-radius:10px;padding:12px 20px;
-                display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
-        <span style="color:white;font-size:18px;font-weight:700;">📋 Cases</span>
-        <span style="color:rgba(255,255,255,0.9);font-size:13px;">👤 {logged_in_user}</span>
-    </div>
-    """, unsafe_allow_html=True)
+    hdr_col, btn_col = st.columns([8, 1])
+    with hdr_col:
+        st.markdown(f"""
+        <div style="background:{GRAB_GREEN};border-radius:10px;padding:12px 20px;
+                    display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+            <span style="color:white;font-size:18px;font-weight:700;">📋 Cases</span>
+            <span style="color:rgba(255,255,255,0.9);font-size:13px;">👤 {logged_in_user}</span>
+        </div>
+        """, unsafe_allow_html=True)
+    with btn_col:
+        st.markdown("<div style='margin-top:8px'></div>", unsafe_allow_html=True)
+        if st.button("🔄 Refresh", use_container_width=True, key="refresh_cases", help="Fetch latest data from Google Sheets"):
+            _invalidate_cache()
+            st.rerun()
 
     df = _get_active_cases()
 
