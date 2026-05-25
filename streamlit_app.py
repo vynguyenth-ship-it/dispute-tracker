@@ -594,25 +594,20 @@ def page_cases():
                 f'🚫 {_esc(row["reject_reason"])}</span>'
             )
 
-        st.markdown(f"""
-        <div style="border-left:4px solid {sc};background:white;
-                    border-radius:0 8px 8px 0;padding:12px 16px 8px;
-                    border:1px solid #e8e8e8;border-left:4px solid {sc};
-                    margin-bottom:2px;">
-            <div style="font-size:11px;color:#999;font-weight:500;letter-spacing:.3px">{_esc(cid)}</div>
-            <div style="font-size:14px;font-weight:600;color:#1a1a1a;margin:3px 0 2px;
-                        line-height:1.3">{subject_safe}</div>
-            <div style="font-size:12px;color:#666;margin-bottom:7px">{sender_safe}</div>
-            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-                <span style="background:{GRAB_LIGHT};color:{GRAB_DARK};padding:2px 10px;
-                             border-radius:12px;font-size:11px;font-weight:500">{_esc(row['queue'])}</span>
-                <span style="background:{sc}22;color:{sc};padding:2px 10px;
-                             border-radius:12px;font-size:11px;font-weight:500">{status}</span>
-                <span style="color:#aaa;font-size:11px">{date_short}</span>
-                {reject_html}{assigned_html}
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
+        st.markdown(
+            f'<div style="border-left:4px solid {sc};background:white;border-radius:0 8px 8px 0;'
+            f'padding:12px 16px 8px;border:1px solid #e8e8e8;margin-bottom:2px;">'
+            f'<p style="font-size:11px;color:#999;font-weight:500;letter-spacing:.3px;margin:0">{_esc(cid)}</p>'
+            f'<p style="font-size:14px;font-weight:600;color:#1a1a1a;margin:3px 0 2px;line-height:1.3">{subject_safe}</p>'
+            f'<p style="font-size:12px;color:#666;margin:0 0 7px">{sender_safe}</p>'
+            f'<p style="margin:0;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">'
+            f'<span style="background:{GRAB_LIGHT};color:{GRAB_DARK};padding:2px 10px;border-radius:12px;font-size:11px;font-weight:500">{_esc(row["queue"])}</span>'
+            f'<span style="background:{sc}22;color:{sc};padding:2px 10px;border-radius:12px;font-size:11px;font-weight:500">{status}</span>'
+            f'<span style="color:#aaa;font-size:11px">{date_short}</span>'
+            f'{reject_html}{assigned_html}'
+            f'</p></div>',
+            unsafe_allow_html=True,
+        )
 
         # ── Action buttons ────────────────────────────────────────────────────
         b1, b2, b3, b4 = st.columns([2, 2, 1.5, 1.5])
