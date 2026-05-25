@@ -116,8 +116,8 @@ hr {{ border-color: #e8e8e8 !important; }}
 
 /* Queue card overrides — must beat the 38px !important rule above */
 button.qcard {{
-    height: 200px !important;
-    min-height: 200px !important;
+    height: 150px !important;
+    min-height: 150px !important;
     white-space: normal !important;
     display: flex !important;
     flex-direction: column !important;
@@ -331,8 +331,6 @@ def page_home():
     # Summary rejected card (all queues combined)
     n_rejected = int((df["status"] == "Rejected").sum()) if not df.empty else 0
 
-    cases_page = st.Page(page_cases, title="Cases", icon="📋")
-
     # Row 1: first 3 queue cards
     row1 = st.columns(3)
     for i, q in enumerate(QUEUES[:3]):
@@ -345,7 +343,7 @@ def page_home():
                 use_container_width=True,
             ):
                 st.query_params["queue"] = q
-                st.switch_page(cases_page)
+                st.switch_page(PAGE_CASES)
 
     # Row 2: last 2 queue cards + Rejected summary card
     row2 = st.columns(3)
@@ -359,7 +357,7 @@ def page_home():
                 use_container_width=True,
             ):
                 st.query_params["queue"] = q
-                st.switch_page(cases_page)
+                st.switch_page(PAGE_CASES)
     with row2[2]:
         if st.button(
             f"🚫\n{n_rejected}\nRejected\n(all queues)",
@@ -367,7 +365,7 @@ def page_home():
             use_container_width=True,
         ):
             st.query_params["status"] = "Rejected"
-            st.switch_page(cases_page)
+            st.switch_page(PAGE_CASES)
 
     # Inject styles for queue card buttons via JS
     _all_card_labels = QUEUES + ["Rejected"]
@@ -397,10 +395,10 @@ def page_home():
                 const icon      = iconMatch ? iconMatch[1] : '';
 
                 btn.innerHTML =
-                    '<span style="font-size:26px;line-height:1">' + icon + '</span>' +
-                    '<span style="font-size:44px;font-weight:900;line-height:1.1;color:#00802E">' + count + '</span>' +
-                    '<span style="font-size:13px;font-weight:700;margin-top:4px">' + name + '</span>' +
-                    '<span style="font-size:11px;color:#888;margin-top:4px;text-align:center">' + afterName + '</span>';
+                    '<span style="font-size:20px;line-height:1">' + icon + '</span>' +
+                    '<span style="font-size:36px;font-weight:900;line-height:1.1;color:#00802E">' + count + '</span>' +
+                    '<span style="font-size:12px;font-weight:700;margin-top:3px">' + name + '</span>' +
+                    '<span style="font-size:10px;color:#888;margin-top:3px;text-align:center">' + afterName + '</span>';
             }});
         }}
         styleCards();
@@ -755,9 +753,9 @@ def page_archive():
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
-pg = st.navigation([
-    st.Page(page_home,    title="Dashboard", icon="📊"),
-    st.Page(page_cases,   title="Cases",     icon="📋"),
-    st.Page(page_archive, title="Archive",   icon="🗂️"),
-])
+PAGE_HOME    = st.Page(page_home,    title="Dashboard", icon="📊")
+PAGE_CASES   = st.Page(page_cases,   title="Cases",     icon="📋")
+PAGE_ARCHIVE = st.Page(page_archive, title="Archive",   icon="🗂️")
+
+pg = st.navigation([PAGE_HOME, PAGE_CASES, PAGE_ARCHIVE])
 pg.run()
