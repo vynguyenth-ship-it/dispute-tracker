@@ -327,24 +327,16 @@ def page_home():
         st.session_state["nav_status"] = s
         st.switch_page(PAGE_CASES)
 
-    def _card_marker(icon, name, count, stats):
-        """Invisible marker div carrying card data — read by JS to rebuild button HTML."""
-        import json as _j
-        payload = _j.dumps({"icon": icon, "name": name, "count": str(count), "stats": stats})
-        st.markdown(
-            f'<div class="qcard-data" data-card=\'{payload}\' style="display:none"></div>',
-            unsafe_allow_html=True,
-        )
-
     # Row 1: first 3 queue cards
     row1 = st.columns(3)
     for i, q in enumerate(QUEUES[:3]):
         total_q = queue_counts.get(q, 0)
         qs = queue_status[q]
         with row1[i]:
-            _card_marker(QUEUE_ICONS.get(q, ''), q, total_q,
-                         f"🆕 {qs['New']}  ⏳ {qs['In Progress']}  ✅ {qs['Completed']}")
-            if st.button(" ", key=f"qcard_{q}", use_container_width=True):
+            if st.button(
+                f"{QUEUE_ICONS.get(q,'')}\n{total_q}\n{q}\n🆕 {qs['New']}  ⏳ {qs['In Progress']}  ✅ {qs['Completed']}",
+                key=f"qcard_{q}", use_container_width=True,
+            ):
                 _go_queue(q)
 
     # Row 2: last 2 queue cards + Rejected summary card
@@ -353,61 +345,62 @@ def page_home():
         total_q = queue_counts.get(q, 0)
         qs = queue_status[q]
         with row2[i]:
-            _card_marker(QUEUE_ICONS.get(q, ''), q, total_q,
-                         f"🆕 {qs['New']}  ⏳ {qs['In Progress']}  ✅ {qs['Completed']}")
-            if st.button(" ", key=f"qcard_{q}", use_container_width=True):
+            if st.button(
+                f"{QUEUE_ICONS.get(q,'')}\n{total_q}\n{q}\n🆕 {qs['New']}  ⏳ {qs['In Progress']}  ✅ {qs['Completed']}",
+                key=f"qcard_{q}", use_container_width=True,
+            ):
                 _go_queue(q)
     with row2[2]:
-        _card_marker("🚫", "Rejected", n_rejected, "(all queues)")
-        if st.button(" ", key="qcard_Rejected", use_container_width=True):
+        if st.button(
+            f"🚫\n{n_rejected}\nRejected\n(all queues)",
+            key="qcard_Rejected", use_container_width=True,
+        ):
             _go_status("Rejected")
 
-    # JS: find each marker, walk to the next button sibling, rebuild its innerHTML
-    _components.html("""
+    # JS: parse button text with regex, rebuild innerHTML, force column layout
+    _card_labels_js = str(QUEUES + ["Rejected"]).replace("'", '"')
+    _components.html(f"""
     <script>
-    (function() {
-        function styleCards() {
-            const doc = window.parent.document;
-            doc.querySelectorAll('.qcard-data').forEach(function(marker) {
-                var data;
-                try { data = JSON.parse(marker.dataset.card); } catch(e) { return; }
+    (function() {{
+        const LABELS = {_card_labels_js};
+        function styleCards() {{
+            window.parent.document.querySelectorAll('button').forEach(function(btn) {{
+                if (btn.dataset.qcard) return;
+                var txt = (btn.innerText || '').trim();
+                if (!LABELS.some(function(l) {{ return txt.indexOf(l) >= 0; }})) return;
 
-                // The button is inside the next stButton div after the marker's container
-                var container = marker.closest('[data-testid="stMarkdownContainer"]');
-                if (!container) return;
-                var btnWrapper = container.nextElementSibling;
-                if (!btnWrapper) return;
-                var btn = btnWrapper.querySelector('button');
-                if (!btn || btn.dataset.qcard) return;
                 btn.dataset.qcard = '1';
 
-                btn.innerHTML =
-                    '<span style="display:block;font-size:15px;font-weight:700;text-align:center;line-height:1.4">'
-                        + data.icon + ' ' + data.name +
-                    '</span>' +
-                    '<span style="display:block;font-size:42px;font-weight:900;color:#00802E;line-height:1.1;margin:6px 0">'
-                        + data.count +
-                    '</span>' +
-                    '<span style="display:block;font-size:13px;color:#555;font-weight:500;text-align:center">'
-                        + data.stats +
-                    '</span>';
+                // Extract icon (first non-space cluster), count (first number),
+                // name (matching label), stats (everything after name)
+                var iconM  = txt.match(/^(\\S+)/);
+                var icon   = iconM ? iconM[1] : '';
+                var numM   = txt.match(/(\\d+)/);
+                var count  = numM ? numM[1] : '0';
+                var name   = LABELS.find(function(l) {{ return txt.indexOf(l) >= 0; }}) || '';
+                var after  = txt.slice(txt.indexOf(name) + name.length).trim();
 
-                btn.style.setProperty('height', '150px', 'important');
-                btn.style.setProperty('min-height', '150px', 'important');
+                btn.innerHTML =
+                    '<span style="display:block;font-size:28px;line-height:1;margin-bottom:6px">' + icon + '</span>' +
+                    '<span style="display:block;font-size:44px;font-weight:900;line-height:1;color:#00802E;margin-bottom:6px">' + count + '</span>' +
+                    '<span style="display:block;font-size:13px;font-weight:700;color:#00802E;margin-bottom:8px">' + name + '</span>' +
+                    '<span style="display:block;font-size:12px;color:#555;text-align:center">' + after + '</span>';
+
+                btn.style.setProperty('height', '190px', 'important');
+                btn.style.setProperty('min-height', '190px', 'important');
                 btn.style.setProperty('display', 'flex', 'important');
                 btn.style.setProperty('flex-direction', 'column', 'important');
                 btn.style.setProperty('align-items', 'center', 'important');
                 btn.style.setProperty('justify-content', 'center', 'important');
                 btn.style.setProperty('border-radius', '12px', 'important');
                 btn.style.setProperty('padding', '16px 8px', 'important');
-                btn.style.setProperty('line-height', '1', 'important');
                 btn.style.setProperty('white-space', 'normal', 'important');
-            });
-        }
+            }});
+        }}
         styleCards();
         setTimeout(styleCards, 300);
         setTimeout(styleCards, 1000);
-    })();
+    }})();
     </script>
     """, height=0)
 
