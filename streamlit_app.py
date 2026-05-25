@@ -331,6 +331,16 @@ def page_home():
     # Summary rejected card (all queues combined)
     n_rejected = int((df["status"] == "Rejected").sum()) if not df.empty else 0
 
+    def _go_queue(q):
+        st.session_state["nav_queue"]  = q
+        st.session_state["nav_status"] = None
+        st.switch_page(PAGE_CASES)
+
+    def _go_status(s):
+        st.session_state["nav_queue"]  = None
+        st.session_state["nav_status"] = s
+        st.switch_page(PAGE_CASES)
+
     # Row 1: first 3 queue cards
     row1 = st.columns(3)
     for i, q in enumerate(QUEUES[:3]):
@@ -338,12 +348,11 @@ def page_home():
         qs = queue_status[q]
         with row1[i]:
             if st.button(
-                f"{QUEUE_ICONS.get(q, '')}\n{total_q}\n{q}\n🆕 {qs['New']}  ⏳ {qs['In Progress']}  ✅ {qs['Completed']}",
+                f"{QUEUE_ICONS.get(q, '')} {q}\n{total_q}\n🆕 {qs['New']}  ⏳ {qs['In Progress']}  ✅ {qs['Completed']}",
                 key=f"qcard_{q}",
                 use_container_width=True,
             ):
-                st.query_params["queue"] = q
-                st.switch_page(PAGE_CASES)
+                _go_queue(q)
 
     # Row 2: last 2 queue cards + Rejected summary card
     row2 = st.columns(3)
@@ -352,20 +361,18 @@ def page_home():
         qs = queue_status[q]
         with row2[i]:
             if st.button(
-                f"{QUEUE_ICONS.get(q, '')}\n{total_q}\n{q}\n🆕 {qs['New']}  ⏳ {qs['In Progress']}  ✅ {qs['Completed']}",
+                f"{QUEUE_ICONS.get(q, '')} {q}\n{total_q}\n🆕 {qs['New']}  ⏳ {qs['In Progress']}  ✅ {qs['Completed']}",
                 key=f"qcard_{q}",
                 use_container_width=True,
             ):
-                st.query_params["queue"] = q
-                st.switch_page(PAGE_CASES)
+                _go_queue(q)
     with row2[2]:
         if st.button(
-            f"🚫\n{n_rejected}\nRejected\n(all queues)",
+            f"🚫 Rejected\n{n_rejected}\n(all queues)",
             key="qcard_Rejected",
             use_container_width=True,
         ):
-            st.query_params["status"] = "Rejected"
-            st.switch_page(PAGE_CASES)
+            _go_status("Rejected")
 
     # Inject styles for queue card buttons via JS
     _all_card_labels = QUEUES + ["Rejected"]
@@ -383,22 +390,17 @@ def page_home():
                 btn.dataset.qcard = '1';
                 btn.classList.add('qcard');
 
-                // Parse: leading emoji, then a number, then the queue name, then stats
-                const numMatch  = txt.match(/(\\d+)/);
-                const count     = numMatch ? numMatch[1] : '0';
-                // Queue name is one of the known labels
-                const name      = LABELS.find(l => txt.includes(l)) || '';
-                // Stats line: everything after the name
-                const afterName = txt.slice(txt.indexOf(name) + name.length).trim();
-                // Leading emoji (first char cluster before the number)
-                const iconMatch = txt.match(/^(\\S+)/);
-                const icon      = iconMatch ? iconMatch[1] : '';
+                // Line 1: "icon name", line 2: count, line 3: stats
+                const lines = txt.split('\\n').map(s => s.trim()).filter(Boolean);
+                if (lines.length < 2) return;
+                const nameLine = lines[0];          // e.g. "🚨 Dispute"
+                const count    = lines[1] || '0';   // e.g. "128"
+                const stats    = lines[2] || '';    // e.g. "🆕 5  ⏳ 2  ✅ 1"
 
                 btn.innerHTML =
-                    '<span style="font-size:20px;line-height:1">' + icon + '</span>' +
-                    '<span style="font-size:36px;font-weight:900;line-height:1.1;color:#00802E">' + count + '</span>' +
-                    '<span style="font-size:12px;font-weight:700;margin-top:3px">' + name + '</span>' +
-                    '<span style="font-size:10px;color:#888;margin-top:3px;text-align:center">' + afterName + '</span>';
+                    '<span style="font-size:14px;font-weight:700;line-height:1.3;text-align:center">' + nameLine + '</span>' +
+                    '<span style="font-size:38px;font-weight:900;line-height:1.1;color:#00802E;margin:4px 0">' + count + '</span>' +
+                    '<span style="font-size:13px;color:#555;font-weight:500;text-align:center;margin-top:2px">' + stats + '</span>';
             }});
         }}
         styleCards();
@@ -538,16 +540,14 @@ def page_cases():
         st.markdown(f"<h3 style='color:{GRAB_GREEN};margin-bottom:12px'>🔍 Filters</h3>",
                     unsafe_allow_html=True)
         search        = st.text_input("Search", placeholder="Case ID, sender, subject...")
-        default_status = STATUSES
-        sp = st.query_params.get("status")
-        if sp and sp in STATUSES:
-            default_status = [sp]
-        status_filter = st.multiselect("Status", STATUSES, default=default_status)
-        default_queue = []
-        qp = st.query_params.get("queue")
-        if qp and qp in QUEUES:
-            default_queue = [qp]
-        queue_filter = st.multiselect("Queue", QUEUES, default=default_queue)
+        # Pick up filter set by dashboard card click, then clear it
+        _nav_q = st.session_state.pop("nav_queue",  None)
+        _nav_s = st.session_state.pop("nav_status", None)
+
+        default_status = [_nav_s] if _nav_s and _nav_s in STATUSES else STATUSES
+        status_filter  = st.multiselect("Status", STATUSES, default=default_status)
+        default_queue  = [_nav_q] if _nav_q and _nav_q in QUEUES else []
+        queue_filter   = st.multiselect("Queue", QUEUES, default=default_queue)
         st.markdown(f"<p style='color:{GRAB_DARK};font-weight:600;margin:8px 0 0'>Date Received</p>",
                     unsafe_allow_html=True)
         date_from = st.date_input("From", key="f_date_from")
