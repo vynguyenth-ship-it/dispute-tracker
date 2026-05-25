@@ -4,6 +4,8 @@ Data source: Google Sheets (no local SQLite)
 Deploy: streamlit run streamlit_app.py  |  Streamlit Cloud
 """
 import base64
+import hashlib
+import hmac
 import json as _json
 import threading
 import urllib.parse
@@ -133,10 +135,42 @@ def _get_oauth_config():
     }
 
 
+COOKIE_NAME = "dm_user"
+_COOKIE_SECRET = st.secrets.get("cookie_key", "dispute-tracker-secret-2026")
+
+
+def _sign(email: str) -> str:
+    sig = hmac.new(_COOKIE_SECRET.encode(), email.encode(), hashlib.sha256).hexdigest()
+    return f"{email}|{sig}"
+
+
+def _verify(value: str) -> str | None:
+    if not value or "|" not in value:
+        return None
+    email, sig = value.rsplit("|", 1)
+    expected = hmac.new(_COOKIE_SECRET.encode(), email.encode(), hashlib.sha256).hexdigest()
+    if hmac.compare_digest(sig, expected):
+        return email
+    return None
+
+
 def _require_login():
+    from streamlit_cookies_controller import CookieController
     import requests as req
+
+    controller = CookieController()
+
+    # Already logged in this session
     if st.session_state.get("email"):
         return st.session_state["email"]
+
+    # Try restoring from cookie
+    cookie_val = controller.get(COOKIE_NAME)
+    if cookie_val:
+        email = _verify(cookie_val)
+        if email:
+            st.session_state["email"] = email
+            return email
 
     cfg    = _get_oauth_config()
     params = st.query_params
@@ -153,7 +187,10 @@ def _require_login():
             parts = resp.json().get("id_token", "").split(".")
             if len(parts) >= 2:
                 info = _json.loads(base64.urlsafe_b64decode(parts[1] + "=="))
-                st.session_state["email"] = info.get("email", "unknown@grabtaxi.com")
+                email = info.get("email", "unknown@grabtaxi.com")
+                st.session_state["email"] = email
+                # Persist in cookie (30-day expiry)
+                controller.set(COOKIE_NAME, _sign(email), max_age=30 * 24 * 3600)
                 st.query_params.clear()
                 st.rerun()
         except Exception as e:
