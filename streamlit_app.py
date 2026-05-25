@@ -334,7 +334,7 @@ def page_home():
         qs = queue_status[q]
         with row1[i]:
             if st.button(
-                f"{QUEUE_ICONS.get(q,'')}\n{total_q}\n{q}\n🆕 {qs['New']}  ⏳ {qs['In Progress']}  ✅ {qs['Completed']}",
+                f"{QUEUE_ICONS.get(q,'')} {q}\n{total_q}\n🆕 {qs['New']}  ⏳ {qs['In Progress']}  ✅ {qs['Completed']}",
                 key=f"qcard_{q}", use_container_width=True,
             ):
                 _go_queue(q)
@@ -346,13 +346,13 @@ def page_home():
         qs = queue_status[q]
         with row2[i]:
             if st.button(
-                f"{QUEUE_ICONS.get(q,'')}\n{total_q}\n{q}\n🆕 {qs['New']}  ⏳ {qs['In Progress']}  ✅ {qs['Completed']}",
+                f"{QUEUE_ICONS.get(q,'')} {q}\n{total_q}\n🆕 {qs['New']}  ⏳ {qs['In Progress']}  ✅ {qs['Completed']}",
                 key=f"qcard_{q}", use_container_width=True,
             ):
                 _go_queue(q)
     with row2[2]:
         if st.button(
-            f"🚫\n{n_rejected}\nRejected\n(all queues)",
+            f"🚫 Rejected\n{n_rejected}\n(all queues)",
             key="qcard_Rejected", use_container_width=True,
         ):
             _go_status("Rejected")
@@ -371,19 +371,20 @@ def page_home():
 
                 btn.dataset.qcard = '1';
 
-                // Extract icon (first non-space cluster), count (first number),
-                // name (matching label), stats (everything after name)
-                var iconM  = txt.match(/^(\\S+)/);
-                var icon   = iconM ? iconM[1] : '';
-                var numM   = txt.match(/(\\d+)/);
-                var count  = numM ? numM[1] : '0';
-                var name   = LABELS.find(function(l) {{ return txt.indexOf(l) >= 0; }}) || '';
-                var after  = txt.slice(txt.indexOf(name) + name.length).trim();
+                // Label format: "icon name\ncount\nstats"
+                // Use longest matching label to avoid "Invoice" matching "Internal Invoice"
+                var name = LABELS
+                    .filter(function(l) {{ return txt.indexOf(l) >= 0; }})
+                    .sort(function(a,b) {{ return b.length - a.length; }})[0] || '';
+                var numM  = txt.match(/(\\d+)/);
+                var count = numM ? numM[1] : '0';
+                // First line = "icon name", stats = everything after count
+                var firstLine = txt.slice(0, txt.indexOf(count)).trim();
+                var after     = txt.slice(txt.indexOf(count) + count.length).trim();
 
                 btn.innerHTML =
-                    '<span style="display:block;font-size:28px;line-height:1;margin-bottom:6px">' + icon + '</span>' +
+                    '<span style="display:block;font-size:14px;font-weight:700;line-height:1.3;margin-bottom:6px;text-align:center">' + firstLine + '</span>' +
                     '<span style="display:block;font-size:44px;font-weight:900;line-height:1;color:#00802E;margin-bottom:6px">' + count + '</span>' +
-                    '<span style="display:block;font-size:13px;font-weight:700;color:#00802E;margin-bottom:8px">' + name + '</span>' +
                     '<span style="display:block;font-size:12px;color:#555;text-align:center">' + after + '</span>';
 
                 btn.style.setProperty('height', '190px', 'important');
