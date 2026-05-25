@@ -114,6 +114,20 @@ div[data-testid="stButton"] > button[kind="primary"]:hover {{ background: {GRAB_
 }}
 hr {{ border-color: #e8e8e8 !important; }}
 
+/* Queue card overrides — must beat the 38px !important rule above */
+button.qcard {{
+    height: 200px !important;
+    min-height: 200px !important;
+    white-space: normal !important;
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: center !important;
+    justify-content: center !important;
+    border-radius: 12px !important;
+    padding: 16px 8px !important;
+    line-height: 1 !important;
+    gap: 6px !important;
+}}
 </style>
 """
 st.markdown(THEME_CSS, unsafe_allow_html=True)
@@ -365,36 +379,33 @@ def page_home():
         function styleCards() {{
             const buttons = window.parent.document.querySelectorAll('button');
             buttons.forEach(btn => {{
-                const txt = btn.innerText || '';
+                const txt = (btn.innerText || '').trim();
                 if (!LABELS.some(l => txt.includes(l))) return;
-                // Only rebuild once
-                if (btn.dataset.styled) return;
-                btn.dataset.styled = '1';
-                const lines = txt.trim().split('\\n').map(s => s.trim()).filter(Boolean);
-                // lines: [icon, count, name, stats...]
-                if (lines.length < 3) return;
-                const icon  = lines[0];
-                const count = lines[1];
-                const name  = lines[2];
-                const stats = lines.slice(3).join('  ');
+                if (btn.dataset.qcard) return;
+                btn.dataset.qcard = '1';
+                btn.classList.add('qcard');
+
+                // Parse: leading emoji, then a number, then the queue name, then stats
+                const numMatch  = txt.match(/(\\d+)/);
+                const count     = numMatch ? numMatch[1] : '0';
+                // Queue name is one of the known labels
+                const name      = LABELS.find(l => txt.includes(l)) || '';
+                // Stats line: everything after the name
+                const afterName = txt.slice(txt.indexOf(name) + name.length).trim();
+                // Leading emoji (first char cluster before the number)
+                const iconMatch = txt.match(/^(\\S+)/);
+                const icon      = iconMatch ? iconMatch[1] : '';
+
                 btn.innerHTML =
-                    '<span style="display:block;font-size:24px;line-height:1;margin-bottom:6px">' + icon + '</span>' +
-                    '<span style="display:block;font-size:42px;font-weight:800;line-height:1;color:#00802E;margin-bottom:6px">' + count + '</span>' +
-                    '<span style="display:block;font-size:13px;font-weight:600;margin-bottom:8px">' + name + '</span>' +
-                    '<span style="display:block;font-size:11px;color:#888">' + stats + '</span>';
-                btn.style.height = '220px';
-                btn.style.minHeight = '220px';
-                btn.style.display = 'flex';
-                btn.style.flexDirection = 'column';
-                btn.style.alignItems = 'center';
-                btn.style.justifyContent = 'center';
-                btn.style.borderRadius = '12px';
-                btn.style.padding = '20px 8px';
+                    '<span style="font-size:26px;line-height:1">' + icon + '</span>' +
+                    '<span style="font-size:44px;font-weight:900;line-height:1.1;color:#00802E">' + count + '</span>' +
+                    '<span style="font-size:13px;font-weight:700;margin-top:4px">' + name + '</span>' +
+                    '<span style="font-size:11px;color:#888;margin-top:4px;text-align:center">' + afterName + '</span>';
             }});
         }}
         styleCards();
-        setTimeout(styleCards, 200);
-        setTimeout(styleCards, 800);
+        setTimeout(styleCards, 300);
+        setTimeout(styleCards, 1000);
     }})();
     </script>
     """, height=0)
