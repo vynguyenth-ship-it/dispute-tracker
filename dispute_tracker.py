@@ -367,7 +367,7 @@ def check_new_emails():
         body = get_message_body(msg.get("payload", {}))
         queue = classify_email(subject, body)
         case_id = generate_case_id()
-        email_link = f"https://mail.google.com/mail/u/0/#inbox/{msg_id}"
+        email_link = f"https://mail.google.com/mail/u/{CONFIG['GROUP_EMAIL']}/#all/{msg_id}"
 
         row = {
             "case_id": case_id,
