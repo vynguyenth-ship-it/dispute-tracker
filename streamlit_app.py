@@ -228,6 +228,13 @@ def _require_login():
 
 
 # ── Optimistic update helpers ─────────────────────────────────────────────────
+def _invalidate_cache():
+    """Force next load to re-fetch from sheet."""
+    c = _sheet_cache()
+    with c["lock"]:
+        c["ts_active"] = 0.0
+
+
 def _apply_action(cid: str, **fields):
     """Update session state immediately, write to sheet in background thread."""
     if "optimistic" not in st.session_state:
@@ -237,7 +244,7 @@ def _apply_action(cid: str, **fields):
         **fields,
     }
     threading.Thread(target=update_case, args=(cid,), kwargs=fields, daemon=True).start()
-    st.cache_data.clear()
+    _invalidate_cache()
     st.rerun()
 
 
@@ -254,35 +261,54 @@ def _get_active_cases() -> pd.DataFrame:
     return df
 
 
-# ── Data helpers ──────────────────────────────────────────────────────────────
-@st.cache_data(ttl=60)
+# ── Shared cross-session cache (one Sheets read per TTL, shared by all users) ──
+import threading as _threading
+import time as _time
+
+_CACHE_TTL = 120  # seconds
+
+@st.cache_resource
+def _sheet_cache():
+    """Single shared cache object for all user sessions."""
+    return {"active": None, "archive": None, "ts_active": 0.0, "ts_archive": 0.0, "lock": _threading.Lock()}
+
+
+_EMPTY_DF = pd.DataFrame(columns=[
+    "case_id", "date_received", "sender", "subject", "queue",
+    "status", "assigned_to", "assigned_at", "completed_at", "email_link", "reject_reason",
+])
+
+
 def _load_active_cases_cached() -> pd.DataFrame:
-    try:
-        rows = load_cases(CONFIG["SHEET_TAB_NAME"])
-    except Exception as e:
-        st.error(f"Sheet load error: {e}")
-        rows = []
-    if not rows:
-        return pd.DataFrame(columns=[
-            "case_id", "date_received", "sender", "subject", "queue",
-            "status", "assigned_to", "assigned_at", "completed_at", "email_link",
-        ])
-    return pd.DataFrame(rows)
+    cache = _sheet_cache()
+    now = _time.time()
+    with cache["lock"]:
+        if cache["active"] is None or now - cache["ts_active"] > _CACHE_TTL:
+            try:
+                rows = load_cases(CONFIG["SHEET_TAB_NAME"])
+                cache["active"] = pd.DataFrame(rows) if rows else _EMPTY_DF.copy()
+            except Exception as e:
+                st.error(f"Sheet load error: {e}")
+                if cache["active"] is None:
+                    cache["active"] = _EMPTY_DF.copy()
+            cache["ts_active"] = now
+        return cache["active"].copy()
 
 
-@st.cache_data(ttl=60)
 def load_archived_cases() -> pd.DataFrame:
-    try:
-        rows = load_cases(CONFIG["ARCHIVE_TAB_NAME"])
-    except Exception as e:
-        st.error(f"Sheet load error: {e}")
-        rows = []
-    if not rows:
-        return pd.DataFrame(columns=[
-            "case_id", "date_received", "sender", "subject", "queue",
-            "status", "assigned_to", "assigned_at", "completed_at", "email_link",
-        ])
-    return pd.DataFrame(rows)
+    cache = _sheet_cache()
+    now = _time.time()
+    with cache["lock"]:
+        if cache["archive"] is None or now - cache["ts_archive"] > _CACHE_TTL:
+            try:
+                rows = load_cases(CONFIG["ARCHIVE_TAB_NAME"])
+                cache["archive"] = pd.DataFrame(rows) if rows else _EMPTY_DF.copy()
+            except Exception as e:
+                st.error(f"Sheet load error: {e}")
+                if cache["archive"] is None:
+                    cache["archive"] = _EMPTY_DF.copy()
+            cache["ts_archive"] = now
+        return cache["archive"].copy()
 
 
 def _parse_date(date_str: str):
@@ -757,7 +783,10 @@ def page_archive():
     if st.button("🗂 Archive Old Completed Cases Now", use_container_width=False):
         count = archive_old_completed()
         st.success(f"Archived {count} case(s).")
-        st.cache_data.clear()
+        c = _sheet_cache()
+        with c["lock"]:
+            c["ts_active"] = 0.0
+            c["ts_archive"] = 0.0
         st.rerun()
 
     if df.empty:
