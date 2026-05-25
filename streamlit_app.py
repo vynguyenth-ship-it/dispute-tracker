@@ -429,12 +429,12 @@ def page_home():
                 btn.dataset.qcard = line1 + count;
 
                 btn.innerHTML =
-                    '<span style="display:block;font-size:14px;font-weight:700;text-align:center;line-height:1.4;margin-bottom:4px">' + line1 + '</span>' +
-                    '<span style="display:block;font-size:46px;font-weight:900;line-height:1;color:#00802E;margin-bottom:4px">' + count + '</span>' +
-                    '<span style="display:block;font-size:12px;color:#555;text-align:center;line-height:1.5">' + line3 + '</span>';
+                    '<span style="display:block;font-size:13px;font-weight:700;text-align:center;line-height:1.4;margin-bottom:3px">' + line1 + '</span>' +
+                    '<span style="display:block;font-size:36px;font-weight:900;line-height:1;color:#00802E;margin-bottom:3px">' + count + '</span>' +
+                    '<span style="display:block;font-size:11px;color:#555;text-align:center;line-height:1.5">' + line3 + '</span>';
 
-                btn.style.setProperty('height',           '160px',  'important');
-                btn.style.setProperty('min-height',       '160px',  'important');
+                btn.style.setProperty('height',           '130px',  'important');
+                btn.style.setProperty('min-height',       '130px',  'important');
                 btn.style.setProperty('display',          'flex',   'important');
                 btn.style.setProperty('flex-direction',   'column', 'important');
                 btn.style.setProperty('align-items',      'center', 'important');
