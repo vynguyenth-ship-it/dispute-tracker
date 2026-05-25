@@ -114,20 +114,6 @@ div[data-testid="stButton"] > button[kind="primary"]:hover {{ background: {GRAB_
 }}
 hr {{ border-color: #e8e8e8 !important; }}
 
-/* Queue card overrides — must beat the 38px !important rule above */
-button.qcard {{
-    height: 150px !important;
-    min-height: 150px !important;
-    white-space: normal !important;
-    display: flex !important;
-    flex-direction: column !important;
-    align-items: center !important;
-    justify-content: center !important;
-    border-radius: 12px !important;
-    padding: 16px 8px !important;
-    line-height: 1 !important;
-    gap: 6px !important;
-}}
 </style>
 """
 st.markdown(THEME_CSS, unsafe_allow_html=True)
@@ -341,17 +327,24 @@ def page_home():
         st.session_state["nav_status"] = s
         st.switch_page(PAGE_CASES)
 
+    def _card_marker(icon, name, count, stats):
+        """Invisible marker div carrying card data — read by JS to rebuild button HTML."""
+        import json as _j
+        payload = _j.dumps({"icon": icon, "name": name, "count": str(count), "stats": stats})
+        st.markdown(
+            f'<div class="qcard-data" data-card=\'{payload}\' style="display:none"></div>',
+            unsafe_allow_html=True,
+        )
+
     # Row 1: first 3 queue cards
     row1 = st.columns(3)
     for i, q in enumerate(QUEUES[:3]):
         total_q = queue_counts.get(q, 0)
         qs = queue_status[q]
         with row1[i]:
-            if st.button(
-                f"{QUEUE_ICONS.get(q, '')} {q}\n{total_q}\n🆕 {qs['New']}  ⏳ {qs['In Progress']}  ✅ {qs['Completed']}",
-                key=f"qcard_{q}",
-                use_container_width=True,
-            ):
+            _card_marker(QUEUE_ICONS.get(q, ''), q, total_q,
+                         f"🆕 {qs['New']}  ⏳ {qs['In Progress']}  ✅ {qs['Completed']}")
+            if st.button(" ", key=f"qcard_{q}", use_container_width=True):
                 _go_queue(q)
 
     # Row 2: last 2 queue cards + Rejected summary card
@@ -360,53 +353,61 @@ def page_home():
         total_q = queue_counts.get(q, 0)
         qs = queue_status[q]
         with row2[i]:
-            if st.button(
-                f"{QUEUE_ICONS.get(q, '')} {q}\n{total_q}\n🆕 {qs['New']}  ⏳ {qs['In Progress']}  ✅ {qs['Completed']}",
-                key=f"qcard_{q}",
-                use_container_width=True,
-            ):
+            _card_marker(QUEUE_ICONS.get(q, ''), q, total_q,
+                         f"🆕 {qs['New']}  ⏳ {qs['In Progress']}  ✅ {qs['Completed']}")
+            if st.button(" ", key=f"qcard_{q}", use_container_width=True):
                 _go_queue(q)
     with row2[2]:
-        if st.button(
-            f"🚫 Rejected\n{n_rejected}\n(all queues)",
-            key="qcard_Rejected",
-            use_container_width=True,
-        ):
+        _card_marker("🚫", "Rejected", n_rejected, "(all queues)")
+        if st.button(" ", key="qcard_Rejected", use_container_width=True):
             _go_status("Rejected")
 
-    # Inject styles for queue card buttons via JS
-    _all_card_labels = QUEUES + ["Rejected"]
-    _card_labels_js  = str(_all_card_labels).replace("'", '"')
-    _components.html(f"""
+    # JS: find each marker, walk to the next button sibling, rebuild its innerHTML
+    _components.html("""
     <script>
-    (function() {{
-        const LABELS = {_card_labels_js};
-        function styleCards() {{
-            const buttons = window.parent.document.querySelectorAll('button');
-            buttons.forEach(btn => {{
-                const txt = (btn.innerText || '').trim();
-                if (!LABELS.some(l => txt.includes(l))) return;
-                if (btn.dataset.qcard) return;
-                btn.dataset.qcard = '1';
-                btn.classList.add('qcard');
+    (function() {
+        function styleCards() {
+            const doc = window.parent.document;
+            doc.querySelectorAll('.qcard-data').forEach(function(marker) {
+                var data;
+                try { data = JSON.parse(marker.dataset.card); } catch(e) { return; }
 
-                // Line 1: "icon name", line 2: count, line 3: stats
-                const lines = txt.split('\\n').map(s => s.trim()).filter(Boolean);
-                if (lines.length < 2) return;
-                const nameLine = lines[0];          // e.g. "🚨 Dispute"
-                const count    = lines[1] || '0';   // e.g. "128"
-                const stats    = lines[2] || '';    // e.g. "🆕 5  ⏳ 2  ✅ 1"
+                // The button is inside the next stButton div after the marker's container
+                var container = marker.closest('[data-testid="stMarkdownContainer"]');
+                if (!container) return;
+                var btnWrapper = container.nextElementSibling;
+                if (!btnWrapper) return;
+                var btn = btnWrapper.querySelector('button');
+                if (!btn || btn.dataset.qcard) return;
+                btn.dataset.qcard = '1';
 
                 btn.innerHTML =
-                    '<span style="display:block;font-size:14px;font-weight:700;line-height:1.3;text-align:center">' + nameLine + '</span>' +
-                    '<span style="display:block;font-size:38px;font-weight:900;line-height:1.1;color:#00802E;margin:6px 0 4px">' + count + '</span>' +
-                    '<span style="display:block;font-size:13px;color:#555;font-weight:500;text-align:center">' + stats + '</span>';
-            }});
-        }}
+                    '<span style="display:block;font-size:15px;font-weight:700;text-align:center;line-height:1.4">'
+                        + data.icon + ' ' + data.name +
+                    '</span>' +
+                    '<span style="display:block;font-size:42px;font-weight:900;color:#00802E;line-height:1.1;margin:6px 0">'
+                        + data.count +
+                    '</span>' +
+                    '<span style="display:block;font-size:13px;color:#555;font-weight:500;text-align:center">'
+                        + data.stats +
+                    '</span>';
+
+                btn.style.setProperty('height', '150px', 'important');
+                btn.style.setProperty('min-height', '150px', 'important');
+                btn.style.setProperty('display', 'flex', 'important');
+                btn.style.setProperty('flex-direction', 'column', 'important');
+                btn.style.setProperty('align-items', 'center', 'important');
+                btn.style.setProperty('justify-content', 'center', 'important');
+                btn.style.setProperty('border-radius', '12px', 'important');
+                btn.style.setProperty('padding', '16px 8px', 'important');
+                btn.style.setProperty('line-height', '1', 'important');
+                btn.style.setProperty('white-space', 'normal', 'important');
+            });
+        }
         styleCards();
         setTimeout(styleCards, 300);
         setTimeout(styleCards, 1000);
-    }})();
+    })();
     </script>
     """, height=0)
 
