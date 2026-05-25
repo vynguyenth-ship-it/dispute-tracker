@@ -177,13 +177,54 @@ def find_case(case_id: str) -> sqlite3.Row | None:
         return conn.execute("SELECT * FROM cases WHERE case_id = ?", (case_id,)).fetchone()
 
 
+_FIELD_COL = {
+    "date_received": 1, "sender": 2, "subject": 3, "queue": 4,
+    "status": 5, "assigned_to": 6, "assigned_at": 7,
+    "completed_at": 8, "email_link": 9,
+}
+
+
 def update_case(case_id: str, **fields):
+    """Update specific cells for a case row directly in the Google Sheet."""
     if not fields:
         return
-    set_clause = ", ".join(f"{k} = ?" for k in fields)
-    values = list(fields.values()) + [case_id]
-    with get_db() as conn:
-        conn.execute(f"UPDATE cases SET {set_clause} WHERE case_id = ?", values)
+    try:
+        service = get_sheets_service()
+        sheet_id = CONFIG["SHEET_ID"]
+        tab = CONFIG["SHEET_TAB_NAME"]
+
+        # Fetch only column A to locate the row
+        result = service.spreadsheets().values().get(
+            spreadsheetId=sheet_id, range=f"{tab}!A:A",
+        ).execute()
+        col_a = result.get("values", [])
+
+        row_num = None
+        for i, cell in enumerate(col_a):
+            if cell and cell[0] == case_id:
+                row_num = i + 1  # 1-based sheet row
+                break
+
+        if row_num is None:
+            log.error(f"update_case: {case_id} not found in sheet '{tab}'")
+            return
+
+        data = []
+        for field, value in fields.items():
+            col_idx = _FIELD_COL.get(field)
+            if col_idx is None:
+                continue
+            col_letter = chr(ord("A") + col_idx)
+            data.append({"range": f"{tab}!{col_letter}{row_num}", "values": [[value]]})
+
+        if data:
+            service.spreadsheets().values().batchUpdate(
+                spreadsheetId=sheet_id,
+                body={"valueInputOption": "RAW", "data": data},
+            ).execute()
+            log.info(f"update_case: {case_id} → {fields}")
+    except Exception as e:
+        log.error(f"update_case failed for {case_id}: {e}")
 
 
 # ============================================================
@@ -379,27 +420,22 @@ def _parse_completed_at(raw: str) -> datetime | None:
         return None
 
 
-def archive_old_completed():
+def archive_old_completed() -> int:
     log.info("=== Archive run ===")
     cutoff = datetime.now(TZ) - timedelta(days=CONFIG["ARCHIVE_AFTER_DAYS"])
-
-    with get_db() as conn:
-        rows = conn.execute(
-            "SELECT * FROM cases WHERE status = 'Completed' AND archived = 0"
-        ).fetchall()
-
+    rows = load_cases(CONFIG["SHEET_TAB_NAME"])
     archived = 0
     for row in rows:
-        completed_dt = _parse_completed_at(row["completed_at"])
-        if completed_dt is None:
-            log.warning(f"Could not parse completed_at for {row['case_id']}: {row['completed_at']!r}")
+        if row.get("status") != "Completed":
             continue
-
+        completed_dt = _parse_completed_at(row.get("completed_at", ""))
+        if completed_dt is None:
+            continue
         if completed_dt < cutoff:
-            update_case(row["case_id"], archived=1)
+            archive_case(row["case_id"])
             archived += 1
-
     log.info(f"Archived {archived} cases older than {CONFIG['ARCHIVE_AFTER_DAYS']} day(s).")
+    return archived
 
 
 # ============================================================
