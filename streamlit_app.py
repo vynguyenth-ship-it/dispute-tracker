@@ -97,13 +97,6 @@ div[data-testid="stButton"] > button[kind="primary"] {{
     background: {GRAB_GREEN} !important; color: white !important; border: none !important;
 }}
 div[data-testid="stButton"] > button[kind="primary"]:hover {{ background: {GRAB_DARK} !important; }}
-.refresh-btn div[data-testid="stButton"] > button {{
-    background: {GRAB_GREEN} !important; color: white !important; border: none !important;
-    height: 56px !important; border-radius: 10px !important; font-size: 14px !important;
-}}
-.refresh-btn div[data-testid="stButton"] > button:hover {{
-    background: {GRAB_DARK} !important;
-}}
 [data-testid="stLinkButton"] > a {{
     background: #ffffff !important; color: {GRAB_GREEN} !important;
     border: 1.5px solid {GRAB_GREEN} !important; border-radius: 8px !important;
@@ -126,6 +119,33 @@ hr {{ border-color: #e8e8e8 !important; }}
 </style>
 """
 st.markdown(THEME_CSS, unsafe_allow_html=True)
+
+_components.html(f"""
+<script>
+(function() {{
+    function styleRefresh() {{
+        window.parent.document.querySelectorAll('button').forEach(function(btn) {{
+            var txt = (btn.innerText || btn.textContent || '').trim();
+            if (txt !== 'Refresh' && txt !== '🔄 Refresh') return;
+            if (btn.dataset.refreshStyled) return;
+            btn.dataset.refreshStyled = '1';
+            btn.style.setProperty('background', '{GRAB_GREEN}', 'important');
+            btn.style.setProperty('color', 'white', 'important');
+            btn.style.setProperty('border', 'none', 'important');
+            btn.style.setProperty('border-radius', '10px', 'important');
+            btn.style.setProperty('height', '56px', 'important');
+            btn.style.setProperty('min-height', '56px', 'important');
+            btn.style.setProperty('font-size', '14px', 'important');
+            btn.style.setProperty('font-weight', '600', 'important');
+            btn.onmouseenter = function() {{ btn.style.setProperty('background', '{GRAB_DARK}', 'important'); }};
+            btn.onmouseleave = function() {{ btn.style.setProperty('background', '{GRAB_GREEN}', 'important'); }};
+        }});
+    }}
+    styleRefresh();
+    setInterval(styleRefresh, 500);
+}})();
+</script>
+""", height=0)
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 GOOGLE_AUTH_URL  = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -344,11 +364,9 @@ def page_home():
         </div>
         """, unsafe_allow_html=True)
     with btn_col:
-        st.markdown('<div class="refresh-btn">', unsafe_allow_html=True)
         if st.button("🔄 Refresh", key="refresh_dashboard", use_container_width=True, help="Fetch latest data from Google Sheets"):
             _invalidate_cache()
             st.rerun()
-        st.markdown('</div>', unsafe_allow_html=True)
 
     df     = _get_active_cases()
     df_arc = load_archived_cases()
@@ -615,11 +633,9 @@ def page_cases():
         </div>
         """, unsafe_allow_html=True)
     with btn_col:
-        st.markdown('<div class="refresh-btn">', unsafe_allow_html=True)
         if st.button("🔄 Refresh", use_container_width=True, key="refresh_cases", help="Fetch latest data from Google Sheets"):
             _invalidate_cache()
             st.rerun()
-        st.markdown('</div>', unsafe_allow_html=True)
 
     df = _get_active_cases()
 
