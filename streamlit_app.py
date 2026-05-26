@@ -97,6 +97,13 @@ div[data-testid="stButton"] > button[kind="primary"] {{
     background: {GRAB_GREEN} !important; color: white !important; border: none !important;
 }}
 div[data-testid="stButton"] > button[kind="primary"]:hover {{ background: {GRAB_DARK} !important; }}
+.refresh-btn div[data-testid="stButton"] > button {{
+    background: {GRAB_GREEN} !important; color: white !important; border: none !important;
+    height: 56px !important; border-radius: 10px !important; font-size: 14px !important;
+}}
+.refresh-btn div[data-testid="stButton"] > button:hover {{
+    background: {GRAB_DARK} !important;
+}}
 [data-testid="stLinkButton"] > a {{
     background: #ffffff !important; color: {GRAB_GREEN} !important;
     border: 1.5px solid {GRAB_GREEN} !important; border-radius: 8px !important;
@@ -337,9 +344,11 @@ def page_home():
         </div>
         """, unsafe_allow_html=True)
     with btn_col:
-        if st.button("🔄 Refresh", use_container_width=True, help="Fetch latest data from Google Sheets"):
+        st.markdown('<div class="refresh-btn">', unsafe_allow_html=True)
+        if st.button("🔄 Refresh", key="refresh_dashboard", use_container_width=True, help="Fetch latest data from Google Sheets"):
             _invalidate_cache()
             st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
 
     df     = _get_active_cases()
     df_arc = load_archived_cases()
@@ -606,9 +615,11 @@ def page_cases():
         </div>
         """, unsafe_allow_html=True)
     with btn_col:
+        st.markdown('<div class="refresh-btn">', unsafe_allow_html=True)
         if st.button("🔄 Refresh", use_container_width=True, key="refresh_cases", help="Fetch latest data from Google Sheets"):
             _invalidate_cache()
             st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
 
     df = _get_active_cases()
 
