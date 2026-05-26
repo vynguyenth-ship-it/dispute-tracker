@@ -27,9 +27,7 @@ import sys
 import time
 import logging
 import base64
-import json
 import requests
-import schedule
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -621,6 +619,7 @@ def cmd_archive(_args):
 
 
 def cmd_poll(_args):
+    import schedule
     log.info(f"Starting poller — checking every {CONFIG['POLL_INTERVAL_MINUTES']} min.")
     check_new_emails()
     schedule.every(CONFIG["POLL_INTERVAL_MINUTES"]).minutes.do(check_new_emails)
