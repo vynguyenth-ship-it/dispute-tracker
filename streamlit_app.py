@@ -324,7 +324,7 @@ def _parse_date(date_str: str):
 def page_home():
     logged_in_user = _require_login()
 
-    hdr_col, btn_col = st.columns([8, 1])
+    hdr_col, btn_col = st.columns([8, 1], vertical_alignment="center")
     with hdr_col:
         st.markdown(f"""
         <div style="background:{GRAB_GREEN};border-radius:10px;padding:14px 20px;
@@ -337,7 +337,6 @@ def page_home():
         </div>
         """, unsafe_allow_html=True)
     with btn_col:
-        st.markdown("<div style='margin-top:8px'></div>", unsafe_allow_html=True)
         if st.button("🔄 Refresh", use_container_width=True, help="Fetch latest data from Google Sheets"):
             _invalidate_cache()
             st.rerun()
@@ -597,7 +596,7 @@ def page_home():
 def page_cases():
     logged_in_user = _require_login()
 
-    hdr_col, btn_col = st.columns([8, 1])
+    hdr_col, btn_col = st.columns([8, 1], vertical_alignment="center")
     with hdr_col:
         st.markdown(f"""
         <div style="background:{GRAB_GREEN};border-radius:10px;padding:12px 20px;
@@ -607,7 +606,6 @@ def page_cases():
         </div>
         """, unsafe_allow_html=True)
     with btn_col:
-        st.markdown("<div style='margin-top:8px'></div>", unsafe_allow_html=True)
         if st.button("🔄 Refresh", use_container_width=True, key="refresh_cases", help="Fetch latest data from Google Sheets"):
             _invalidate_cache()
             st.rerun()
