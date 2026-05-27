@@ -1,0 +1,1486 @@
+// ============================================================
+// CONFIGURATION
+// ============================================================
+const CONFIG = {
+  GROUP_EMAIL: "account.receivable.vn@grabtaxi.com",
+  SHEET_NAME: "Cases",
+  ARCHIVE_SHEET_NAME: "Archive",
+  PROCESSED_LABEL: "dispute-tracker-processed",
+  POLL_INTERVAL_MINUTES: 5,
+  ARCHIVE_AFTER_DAYS: 1,
+  MAX_THREADS_PER_RUN: 100,
+  TIMEOUT_BUFFER_MS: 5 * 60 * 1000
+};
+
+// Read webhook URL from Script Properties
+function getSlackWebhookUrl() {
+  const url = PropertiesService.getScriptProperties().getProperty('SLACK_WEBHOOK_URL');
+  if (!url) {
+    throw new Error('SLACK_WEBHOOK_URL not set. Go to Project Settings → Script Properties to add it.');
+  }
+  return url;
+}
+
+// ============================================================
+// CUSTOM MENU — adds "Tracker Tools" to Google Sheet
+// ============================================================
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu("🔧 Tracker Tools")
+    .addItem("🎨 Refresh Row Colors", "refreshSheetColors")
+    .addItem("🔗 Refresh Email Links", "refreshEmailLinksToSearch")  // ← NEW
+    .addItem("📅 Refresh Date Format", "refreshDateReceivedFormat")
+    .addItem("📦 Archive Old Cases", "archiveOldCompleted")
+    .addItem("📊 Health Check", "diagnoseTracker")
+    .addSeparator()
+    .addItem("🧹 Clean Up Test Data", "cleanupTestData")
+    .addItem("🧪 Test Slack Notification", "testSlackNotification")
+    .addToUi();
+}
+
+// ============================================================
+// QUEUE CLASSIFICATION
+// ============================================================
+const QUEUES = [
+  { name: "Internal Invoice", keywords: ["internal invoice"], matchSubject: true },
+  { name: "Dispute", keywords: ["chênh lệch", "sai sót", "bảng kê", "thiếu", "biên bản điều chỉnh", "dispute"], matchSubject: false },
+  { name: "Update Details", keywords: ["thông tin", "không chính xác", "thay đổi", "update details", "update info"], matchSubject: false },
+  { name: "Invoice", keywords: ["request invoice", "xuất hóa đơn", "chưa nhận được hóa đơn", "invoice request"], matchSubject: false },
+  { name: "Others", keywords: [], matchSubject: false },
+];
+
+function classifyEmail(subject, body) {
+  const text = (subject + " " + body).toLowerCase();
+  const subjectLower = subject.toLowerCase();
+
+  for (const queue of QUEUES) {
+    if (queue.name === "Others") continue;
+    const haystack = queue.matchSubject ? subjectLower : text;
+    for (const keyword of queue.keywords) {
+      if (haystack.includes(keyword.toLowerCase())) {
+        return queue.name;
+      }
+    }
+  }
+  return "Others";
+}
+
+// ============================================================
+// SHEET HELPERS
+// ============================================================
+function getSheet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName(CONFIG.SHEET_NAME);
+  if (!sheet) {
+    sheet = ss.insertSheet(CONFIG.SHEET_NAME);
+    sheet.appendRow([
+      "Case ID", "Date Received", "Sender", "Subject",
+      "Queue", "Status", "Assigned To", "Assigned At",
+      "Completed At", "Email Link"
+    ]);
+    sheet.setFrozenRows(1);
+    formatHeaderRow(sheet);
+  }
+  return sheet;
+}
+
+function getArchiveSheet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName(CONFIG.ARCHIVE_SHEET_NAME);
+  if (!sheet) {
+    sheet = ss.insertSheet(CONFIG.ARCHIVE_SHEET_NAME);
+    sheet.appendRow([
+      "Case ID", "Date Received", "Sender", "Subject",
+      "Queue", "Status", "Assigned To", "Assigned At",
+      "Completed At", "Email Link", "Archived At"
+    ]);
+    sheet.setFrozenRows(1);
+    const headerRange = sheet.getRange(1, 1, 1, 11);
+    headerRange.setBackground("#5f6368");
+    headerRange.setFontColor("#ffffff");
+    headerRange.setFontWeight("bold");
+  }
+  return sheet;
+}
+
+function formatHeaderRow(sheet) {
+  const headerRange = sheet.getRange(1, 1, 1, 10);
+  headerRange.setBackground("#1a73e8");
+  headerRange.setFontColor("#ffffff");
+  headerRange.setFontWeight("bold");
+  sheet.setColumnWidth(1, 90);
+  sheet.setColumnWidth(2, 140);
+  sheet.setColumnWidth(3, 220);
+  sheet.setColumnWidth(4, 300);
+  sheet.setColumnWidth(5, 140);
+  sheet.setColumnWidth(6, 100);
+  sheet.setColumnWidth(7, 160);
+  sheet.setColumnWidth(8, 140);
+  sheet.setColumnWidth(9, 140);
+  sheet.setColumnWidth(10, 200);
+}
+
+function getExistingMessageIds(sheet) {
+  if (sheet.getLastRow() < 2) return new Set();
+  const data = sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).getValues();
+  const ids = new Set();
+  data.forEach(row => {
+    if (row[0]) ids.add(String(row[0]));
+  });
+  return ids;
+}
+
+function generateCaseId() {
+  const now = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  return `CASE-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${String(Date.now()).slice(-5)}`;
+}
+
+function applyQueueColor(sheet, row, queue) {
+  const colors = {
+    "Dispute": "#fce8e6",
+    "Update Details": "#e8f0fe",
+    "Invoice": "#e6f4ea",
+    "Internal Invoice": "#fef7e0",
+    "Others": "#f1f3f4",
+  };
+  const color = colors[queue] || "#ffffff";
+  sheet.getRange(row, 1, 1, 10).setBackground(color);
+}
+
+function getOrCreateLabel(name) {
+  let label = GmailApp.getUserLabelByName(name);
+  if (!label) label = GmailApp.createLabel(name);
+  return label;
+}
+
+// CRITICAL: Find current row by Case ID (used by all action functions)
+function findRowByCaseId(caseId) {
+  const sheet = getSheet();
+  if (sheet.getLastRow() < 2) return -1;
+  
+  const data = sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).getValues();
+  for (let i = 0; i < data.length; i++) {
+    if (data[i][0] === caseId) return i + 2;
+  }
+  return -1;
+}
+
+//help function for build search link
+
+// Builds a Gmail search URL for finding a specific email
+// Uses: sender (if real, not group) + cleaned subject + 1-day date window
+function buildSearchLink(sender, subject, date, tz) {
+  // Clean subject
+  const cleanSubject = String(subject)
+    .replace(/^(Fwd:|Re:|FW:|RE:)\s*/gi, "")
+    .replace(/^Trả lời:\s*/gi, "")            // Vietnamese "Re:"
+    .replace(/["\\]/g, " ")
+    .replace(/[()]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .substring(0, 150);
+  
+  if (!cleanSubject) {
+    return "https://mail.google.com/mail/u/0/#inbox";
+  }
+  
+  // Extract sender email
+  const senderMatch = String(sender).match(/<([^>]+)>/);
+  let fromAddr = senderMatch ? senderMatch[1] : String(sender);
+  fromAddr = fromAddr.trim().toLowerCase();
+  
+  // Skip sender filter unless it's an EXTERNAL customer
+  // (internal Grab senders forwarded through group lose original sender)
+  const skipSender = (
+    !fromAddr ||
+    !fromAddr.includes("@") ||
+    fromAddr.endsWith("@grabtaxi.com") ||      // ⭐ skip ALL internal Grab
+    fromAddr.endsWith("@grab.com") ||           // skip @grab.com too
+    fromAddr.includes("via ") ||
+    fromAddr.includes("noreply") ||
+    fromAddr.includes("mailer-daemon")
+  );
+  
+  // Build query
+  const parts = [];
+  parts.push(`subject:(${cleanSubject})`);
+  
+  if (!skipSender) {
+    parts.push(`from:${fromAddr}`);
+  }
+  
+  const searchQuery = parts.join(" ");
+  return "https://mail.google.com/mail/u/0/#search/" + encodeURIComponent(searchQuery);
+}
+// Parses dates from multiple formats
+// Returns Date object or null if can't parse
+function parseDateFlexible(value) {
+  if (!value) return null;
+  
+  // Already a Date object
+  if (value instanceof Date) {
+    return isNaN(value.getTime()) ? null : value;
+  }
+  
+  const str = String(value).trim();
+  if (!str) return null;
+  
+  // === Format 1: DD/MM/YYYY (e.g., "20/05/2026") ===
+  // Vietnamese/European format
+  const ddmmyyyyMatch = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (ddmmyyyyMatch) {
+    const day = parseInt(ddmmyyyyMatch[1], 10);
+    const month = parseInt(ddmmyyyyMatch[2], 10);
+    const year = parseInt(ddmmyyyyMatch[3], 10);
+    
+    // Heuristic: if "month" > 12, it's actually MM/DD/YYYY
+    if (month > 12 && day <= 12) {
+      // Swap — likely MM/DD/YYYY format
+      return new Date(year, day - 1, month);
+    }
+    
+    return new Date(year, month - 1, day);
+  }
+  
+  // === Format 2: YYYY-MM-DD (ISO format, e.g., "2026-05-20") ===
+  const isoMatch = str.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (isoMatch) {
+    return new Date(
+      parseInt(isoMatch[1], 10),
+      parseInt(isoMatch[2], 10) - 1,
+      parseInt(isoMatch[3], 10)
+    );
+  }
+  
+  // === Format 3: YYYY/MM/DD (e.g., "2026/05/20") ===
+  const yyyymmddMatch = str.match(/^(\d{4})\/(\d{1,2})\/(\d{1,2})/);
+  if (yyyymmddMatch) {
+    return new Date(
+      parseInt(yyyymmddMatch[1], 10),
+      parseInt(yyyymmddMatch[2], 10) - 1,
+      parseInt(yyyymmddMatch[3], 10)
+    );
+  }
+  
+  // === Format 4: DD-MM-YYYY (e.g., "20-05-2026") ===
+  const ddmmyyyyDashMatch = str.match(/^(\d{1,2})-(\d{1,2})-(\d{4})/);
+  if (ddmmyyyyDashMatch) {
+    const day = parseInt(ddmmyyyyDashMatch[1], 10);
+    const month = parseInt(ddmmyyyyDashMatch[2], 10);
+    const year = parseInt(ddmmyyyyDashMatch[3], 10);
+    
+    if (month > 12 && day <= 12) {
+      return new Date(year, day - 1, month);
+    }
+    return new Date(year, month - 1, day);
+  }
+  
+  // === Format 5: Sat May 10 2025 10:00:00 GMT+0700 (full Date string) ===
+  // === Format 6: 2026-05-19T07:37:00.000Z (ISO with time) ===
+  // Try generic JavaScript Date parser as fallback
+  try {
+    const parsed = new Date(str);
+    if (!isNaN(parsed.getTime())) {
+      return parsed;
+    }
+  } catch (e) {
+    // Failed
+  }
+  
+  // === Last resort: try replacing common separators ===
+  // Maybe DD.MM.YYYY format (e.g., "20.05.2026")
+  const dotMatch = str.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})/);
+  if (dotMatch) {
+    return new Date(
+      parseInt(dotMatch[3], 10),
+      parseInt(dotMatch[2], 10) - 1,
+      parseInt(dotMatch[1], 10)
+    );
+  }
+  
+  return null;  // Couldn't parse
+}
+
+// ============================================================
+// GMAIL MONITOR — runs on time trigger every 5 min
+// ============================================================
+function checkNewEmails() {
+  const startTime = new Date();
+  const sheet = getSheet();
+  const label = getOrCreateLabel(CONFIG.PROCESSED_LABEL);
+
+  const existingIds = getExistingMessageIds(sheet);
+  Logger.log(`Loaded ${existingIds.size} existing case IDs into cache.`);
+
+  const query = `to:${CONFIG.GROUP_EMAIL} -label:${CONFIG.PROCESSED_LABEL}`;
+  const threads = GmailApp.search(query, 0, CONFIG.MAX_THREADS_PER_RUN);
+  Logger.log(`Found ${threads.length} unprocessed threads.`);
+
+  const newRows = [];
+  const slackQueue = [];
+  const threadsToLabel = [];
+  let processedCount = 0;
+  let skippedCount = 0;
+
+  for (const thread of threads) {
+    if (new Date() - startTime > CONFIG.TIMEOUT_BUFFER_MS) {
+      Logger.log(`⏱️ Timeout buffer reached. Stopping.`);
+      break;
+    }
+
+    const messages = thread.getMessages();
+
+    for (const message of messages) {
+      const msgId = message.getId();
+
+      if (existingIds.has(msgId)) {
+        skippedCount++;
+        continue;
+      }
+
+      const subject = message.getSubject() || "(no subject)";
+      const sender = message.getFrom();
+      const body = message.getPlainBody() || "";
+      const date = message.getDate();
+      const queue = classifyEmail(subject, body);
+      const caseId = generateCaseId();
+      const tz = Session.getScriptTimeZone();
+
+      // ⭐ SMART SEARCH-BASED EMAIL LINK
+      // Uses: sender (if real, not group) + cleaned subject + 1-day date window
+      const emailLink = buildSearchLink(sender, subject, date, tz);
+
+      newRows.push([
+        caseId,
+        Utilities.formatDate(date, tz, "dd/MM/yyyy"),
+        sender,
+        subject,
+        queue,
+        "New",
+        "",
+        "",
+        "",
+        emailLink,
+      ]);
+
+      slackQueue.push({ caseId, sender, subject, queue, emailLink });
+      existingIds.add(msgId);
+      processedCount++;
+    }
+    threadsToLabel.push(thread);
+  }
+
+  // Batch write all rows
+  if (newRows.length > 0) {
+    const startRow = sheet.getLastRow() + 1;
+    sheet.getRange(startRow, 1, newRows.length, 10).setValues(newRows);
+    for (let i = 0; i < newRows.length; i++) {
+      applyQueueColor(sheet, startRow + i, newRows[i][4]);
+    }
+    Logger.log(`✅ Wrote ${newRows.length} rows in one batch.`);
+  }
+
+  threadsToLabel.forEach(t => t.addLabel(label));
+  sendSlackBatch(slackQueue);
+
+  const duration = (new Date() - startTime) / 1000;
+  Logger.log(
+    `=== Run complete in ${duration}s | ` +
+    `Processed: ${processedCount} | ` +
+    `Skipped: ${skippedCount} | ` +
+    `Threads labeled: ${threadsToLabel.length} ===`
+  );
+}
+// ============================================================
+// ARCHIVE — moves cases completed > ARCHIVE_AFTER_DAYS to Archive sheet
+// ============================================================
+function archiveOldCompleted() {
+  const startTime = new Date();
+  Logger.log(`=== Archive run started at ${startTime} ===`);
+
+  const sheet = getSheet();
+  const archiveSheet = getArchiveSheet();
+  const data = sheet.getDataRange().getValues();
+
+  if (data.length < 2) {
+    Logger.log("No data to archive.");
+    return;
+  }
+
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - CONFIG.ARCHIVE_AFTER_DAYS);
+  cutoff.setHours(0, 0, 0, 0);
+
+  const archivedAt = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "dd/MM/yyyy HH:mm");
+  Logger.log(`Cutoff: archiving cases completed before ${Utilities.formatDate(cutoff, Session.getScriptTimeZone(), "dd/MM/yyyy")}`);
+
+  const toArchive = [];
+  const rowsToDelete = [];
+
+  for (let i = 1; i < data.length; i++) {
+    const status = data[i][5];
+    const completedAtRaw = data[i][8];
+
+    if (status !== "Completed") continue;
+    if (!completedAtRaw) continue;
+
+    // Handle both Date objects and DD/MM/YYYY string format
+    let completedDate;
+    if (completedAtRaw instanceof Date) {
+      completedDate = completedAtRaw;
+    } else {
+      const dateStr = String(completedAtRaw).split(" ")[0];
+      const parts = dateStr.split("/");
+      if (parts.length === 3) {
+        // DD/MM/YYYY → YYYY-MM-DD for parsing
+        completedDate = new Date(parts[2] + "-" + parts[1] + "-" + parts[0]);
+      } else {
+        completedDate = new Date(dateStr);
+      }
+    }
+
+    if (isNaN(completedDate.getTime())) {
+      Logger.log(`⚠️ Could not parse Completed At for ${data[i][0]}: ${completedAtRaw}`);
+      continue;
+    }
+
+    if (completedDate < cutoff) {
+      const archiveRow = data[i].slice(0, 10);
+      archiveRow.push(archivedAt);
+      toArchive.push(archiveRow);
+      rowsToDelete.push(i + 1);
+    }
+  }
+
+  if (toArchive.length === 0) {
+    Logger.log(`No cases to archive (no completed cases older than ${CONFIG.ARCHIVE_AFTER_DAYS} day(s)).`);
+    return;
+  }
+
+  // Batch write to archive
+  const archiveStartRow = archiveSheet.getLastRow() + 1;
+  archiveSheet.getRange(archiveStartRow, 1, toArchive.length, 11).setValues(toArchive);
+  Logger.log(`📦 Archived ${toArchive.length} completed cases.`);
+
+  // Delete from active sheet (bottom to top)
+  rowsToDelete.sort((a, b) => b - a);
+  rowsToDelete.forEach(rowNum => sheet.deleteRow(rowNum));
+
+  const duration = (new Date() - startTime) / 1000;
+  Logger.log(`=== Archive complete in ${duration}s. Removed ${rowsToDelete.length} rows. ===`);
+}
+
+// ============================================================
+// SLACK NOTIFICATION
+// ============================================================
+function sendSlackBatch(slackItems) {
+  if (!slackItems || slackItems.length === 0) return;
+
+  // Small batches: send individual notifications
+  if (slackItems.length <= 5) {
+    slackItems.forEach(item => {
+      sendSlackNotification(item.caseId, item.sender, item.subject, item.queue, item.emailLink);
+      Utilities.sleep(200);
+    });
+    return;
+  }
+
+  // Larger batches: send a SUMMARY to avoid spam
+  const byQueue = {};
+  slackItems.forEach(item => {
+    byQueue[item.queue] = (byQueue[item.queue] || 0) + 1;
+  });
+
+  const lines = [];
+  lines.push(`📥 *${slackItems.length} new cases received*`);
+  lines.push(`━━━━━━━━━━━━━━━━━━━━━━━━`);
+  Object.keys(byQueue).forEach(q => {
+    const emoji = { "Dispute": "🚨", "Update Details": "📝", "Invoice": "🧾", "Internal Invoice": "🏢", "Others": "📨" }[q] || "📨";
+    lines.push(`${emoji} *${q}:* ${byQueue[q]}`);
+  });
+  lines.push(``);
+  lines.push(`First few cases:`);
+  slackItems.slice(0, 5).forEach(item => {
+    lines.push(`• \`${item.caseId}\` - ${item.subject}`);
+  });
+  if (slackItems.length > 5) {
+    lines.push(`...and ${slackItems.length - 5} more.`);
+  }
+
+  sendSlackRaw(lines.join("\n"));
+}
+
+function sendSlackNotification(caseId, sender, subject, queue, emailLink) {
+  const emoji = {
+    "Dispute": "🚨",
+    "Update Details": "📝",
+    "Invoice": "🧾",
+    "Internal Invoice": "🏢",
+    "Others": "📨"
+  }[queue] || "📨";
+
+  const text =
+    `${emoji} *New ${queue} Case*\n` +
+    `*Case ID:* ${caseId}\n` +
+    `*From:* ${sender}\n` +
+    `*Subject:* ${subject}\n` +
+    `*Email:* ${emailLink}`;
+
+  sendSlackRaw(text);
+}
+
+function sendSlackRaw(text) {
+  const webhookUrl = getSlackWebhookUrl();
+  const payload = { text: text };
+
+  const options = {
+    method: "post",
+    contentType: "application/json",
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
+  };
+
+  try {
+    const response = UrlFetchApp.fetch(webhookUrl, options);
+    const code = response.getResponseCode();
+    if (code !== 200) {
+      Logger.log(`⚠️ Slack webhook failed [${code}]: ${response.getContentText()}`);
+    }
+    return code;
+  } catch (e) {
+    Logger.log(`❌ Slack webhook error: ${e.message}`);
+    return -1;
+  }
+}
+
+// ============================================================
+// WEB APP ACTIONS (called from UI via google.script.run)
+// ============================================================
+function doGet() {
+  return HtmlService.createHtmlOutputFromFile("Index")
+    .setTitle("Dispute Case Tracker")
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+}
+
+function getCases() {
+  const sheet = getSheet();
+  const data = sheet.getDataRange().getValues();
+
+  if (data.length < 2) return [];
+
+  const headers = data[0];
+  const tz = Session.getScriptTimeZone();
+
+  return data.slice(1).map((row, i) => {
+    const obj = {};
+    headers.forEach((h, j) => {
+      let val = row[j];
+
+      if (val instanceof Date) {
+        val = Utilities.formatDate(val, tz, "dd/MM/yyyy HH:mm");
+      }
+
+      if (val === null || val === undefined) {
+        val = "";
+      } else if (typeof val !== "string" && typeof val !== "number" && typeof val !== "boolean") {
+        val = String(val);
+      }
+
+      obj[h] = val;
+    });
+    obj._row = i + 2;
+    return obj;
+  });
+}
+
+function assignCase(caseId) {
+  const sheet = getSheet();
+  const row = findRowByCaseId(caseId);
+  
+  if (row === -1) {
+    throw new Error("Case ID not found: " + caseId);
+  }
+  
+  const user = Session.getActiveUser().getEmail() || "Unknown";
+  const now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "dd/MM/yyyy HH:mm");
+  
+  sheet.getRange(row, 6).setValue("In Progress");
+  sheet.getRange(row, 7).setValue(user);
+  sheet.getRange(row, 8).setValue(now);
+  
+  Logger.log("Assigned " + caseId + " to " + user);
+  return { 
+    ok: true,
+    user: user,
+    timestamp: now
+  };
+}
+
+function completeCase(caseId) {
+  const sheet = getSheet();
+  const row = findRowByCaseId(caseId);
+  
+  if (row === -1) {
+    throw new Error("Case ID not found: " + caseId);
+  }
+  
+  const now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "dd/MM/yyyy HH:mm");
+  sheet.getRange(row, 6).setValue("Completed");
+  sheet.getRange(row, 9).setValue(now);
+  
+  Logger.log("Completed " + caseId);
+  return { 
+    ok: true,
+    timestamp: now
+  };
+}
+
+function updateQueue(caseId, queue) {
+  const sheet = getSheet();
+  const row = findRowByCaseId(caseId);
+
+  if (row === -1) {
+    throw new Error("Case ID not found: " + caseId);
+  }
+
+  sheet.getRange(row, 5).setValue(queue);
+  applyQueueColor(sheet, row, queue);
+
+  Logger.log("Updated queue for " + caseId + " to " + queue);
+  return { ok: true };
+}
+
+// ============================================================
+// TESTS — run these manually from the Apps Script editor
+// ============================================================
+const TEST_CASES = [
+  {
+    sender: "nguyen.van.a@example.com",
+    subject: "Khiếu nại chênh lệch hóa đơn tháng 4",
+    body: "Kính gửi, tôi phát hiện chênh lệch trong bảng kê tháng 4.",
+    expectedQueue: "Dispute",
+  },
+  {
+    sender: "tran.thi.b@example.com",
+    subject: "Yêu cầu cập nhật thông tin công ty",
+    body: "Thông tin trên hóa đơn không chính xác, cần thay đổi địa chỉ.",
+    expectedQueue: "Update Details",
+  },
+  {
+    sender: "le.van.c@example.com",
+    subject: "Request Invoice for March 2025",
+    body: "Hi team, chưa nhận được hóa đơn cho tháng 3.",
+    expectedQueue: "Invoice",
+  },
+  {
+    sender: "finance.ops@grabtaxi.com",
+    subject: "Internal Invoice Q1 Settlement",
+    body: "Internal invoice for Q1 settlement.",
+    expectedQueue: "Internal Invoice",
+  },
+  {
+    sender: "customer.xyz@gmail.com",
+    subject: "General inquiry about payment",
+    body: "Hello, I have a question about my recent payment.",
+    expectedQueue: "Others",
+  },
+];
+
+function testClassification() {
+  Logger.log("=== Testing Queue Classification ===");
+  let passed = 0;
+
+  TEST_CASES.forEach((tc, i) => {
+    const detected = classifyEmail(tc.subject, tc.body);
+    const ok = detected === tc.expectedQueue;
+    if (ok) passed++;
+    Logger.log(`[${ok ? "PASS" : "FAIL"}] Case ${i + 1}: "${tc.subject}" → ${detected}` +
+      (ok ? "" : ` (expected: ${tc.expectedQueue})`));
+  });
+
+  Logger.log(`=== Results: ${passed}/${TEST_CASES.length} passed ===`);
+}
+
+function testSlackNotification() {
+  Logger.log("=== Testing Slack Notifications ===");
+
+  TEST_CASES.forEach((tc, i) => {
+    const caseId = "TEST-" + String(i + 1).padStart(3, "0");
+    const detectedQueue = classifyEmail(tc.subject, tc.body);
+
+    try {
+      sendSlackNotification(caseId, tc.sender, "[TEST] " + tc.subject, detectedQueue, "https://mail.google.com/mail/u/0/#inbox");
+      Logger.log(`✓ Sent: ${caseId}`);
+    } catch (e) {
+      Logger.log(`❌ ERROR ${caseId}: ${e.message}`);
+    }
+    Utilities.sleep(300);
+  });
+
+  Logger.log("=== Done. Check your Slack channel. ===");
+}
+
+function testSheetLogging() {
+  Logger.log("=== Testing Sheet Logging (Batch Write) ===");
+  const sheet = getSheet();
+  const today = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "dd/MM/yyyy");
+
+  const testRows = TEST_CASES.map((tc, i) => {
+    const detectedQueue = classifyEmail(tc.subject, tc.body);
+    return [
+      "TEST-" + String(i + 1).padStart(3, "0"),
+      today,
+      tc.sender,
+      "[TEST] " + tc.subject,
+      detectedQueue,
+      "New",
+      "",
+      "",
+      "",
+      "https://mail.google.com/mail/",
+    ];
+  });
+
+  const startRow = sheet.getLastRow() + 1;
+  sheet.getRange(startRow, 1, testRows.length, 10).setValues(testRows);
+  testRows.forEach((row, i) => applyQueueColor(sheet, startRow + i, row[4]));
+
+  Logger.log(`✅ Wrote ${testRows.length} test rows in one batch.`);
+}
+
+function cleanupTestData() {
+  const sheet = getSheet();
+  const data = sheet.getDataRange().getValues();
+  const rowsToDelete = [];
+
+  for (let i = data.length - 1; i >= 1; i--) {
+    if (String(data[i][0]).startsWith("TEST-")) {
+      rowsToDelete.push(i + 1);
+    }
+  }
+
+  rowsToDelete.forEach(row => sheet.deleteRow(row));
+  Logger.log(`Cleaned up ${rowsToDelete.length} test row(s).`);
+}
+
+function diagnoseTracker() {
+  Logger.log("=== Tracker Diagnostic ===");
+
+  try {
+    const url = getSlackWebhookUrl();
+    Logger.log(`✅ Slack webhook URL configured`);
+    Logger.log(`   Type: ${url.includes("/triggers/") ? "Workflow Builder" : url.includes("/services/") ? "Incoming Webhook" : "Unknown"}`);
+  } catch (e) {
+    Logger.log(`❌ ${e.message}`);
+  }
+
+  try {
+    const sheet = getSheet();
+    Logger.log(`✅ Sheet "${CONFIG.SHEET_NAME}" exists with ${sheet.getLastRow() - 1} cases`);
+  } catch (e) {
+    Logger.log(`❌ Sheet error: ${e.message}`);
+  }
+
+  try {
+    const archiveSheet = getArchiveSheet();
+    Logger.log(`✅ Archive sheet exists with ${archiveSheet.getLastRow() - 1} archived cases`);
+  } catch (e) {
+    Logger.log(`❌ Archive sheet error: ${e.message}`);
+  }
+
+  try {
+    const cases = getCases();
+    Logger.log(`✅ getCases() returns ${cases.length} cases`);
+  } catch (e) {
+    Logger.log(`❌ getCases error: ${e.message}`);
+  }
+
+  try {
+    const html = HtmlService.createHtmlOutputFromFile("Index").getContent();
+    Logger.log(`✅ Index.html loads (${html.length} chars)`);
+  } catch (e) {
+    Logger.log(`❌ Index.html error: ${e.message}`);
+  }
+
+  const checkTriggers = ScriptApp.getProjectTriggers().filter(t => t.getHandlerFunction() === "checkNewEmails");
+  const archiveTriggers = ScriptApp.getProjectTriggers().filter(t => t.getHandlerFunction() === "archiveOldCompleted");
+  Logger.log(`${checkTriggers.length > 0 ? "✅" : "⚠️"} checkNewEmails triggers: ${checkTriggers.length}`);
+  Logger.log(`${archiveTriggers.length > 0 ? "✅" : "⚠️"} archiveOldCompleted triggers: ${archiveTriggers.length}`);
+
+  try {
+    const query = `to:${CONFIG.GROUP_EMAIL} -label:${CONFIG.PROCESSED_LABEL}`;
+    const threads = GmailApp.search(query, 0, 5);
+    Logger.log(`📧 Unprocessed emails matching filter: ${threads.length}`);
+  } catch (e) {
+    Logger.log(`❌ Gmail search error: ${e.message}`);
+  }
+
+  Logger.log("=== Done ===");
+}
+
+// ============================================================
+// TRIGGER SETUP — run these ONCE manually
+// ============================================================
+function installTrigger() {
+  ScriptApp.getProjectTriggers().forEach(function(t) {
+    if (t.getHandlerFunction() === "checkNewEmails") {
+      ScriptApp.deleteTrigger(t);
+    }
+  });
+
+  ScriptApp.newTrigger("checkNewEmails")
+    .timeBased()
+    .everyMinutes(CONFIG.POLL_INTERVAL_MINUTES)
+    .create();
+
+  Logger.log("✅ Trigger installed: checkNewEmails every " + CONFIG.POLL_INTERVAL_MINUTES + " minutes.");
+}
+
+function installArchiveTrigger() {
+  ScriptApp.getProjectTriggers().forEach(function(t) {
+    if (t.getHandlerFunction() === "archiveOldCompleted") {
+      ScriptApp.deleteTrigger(t);
+    }
+  });
+
+  ScriptApp.newTrigger("archiveOldCompleted")
+    .timeBased()
+    .atHour(23)
+    .everyDays(1)
+    .create();
+
+  Logger.log("✅ Archive trigger installed: archiveOldCompleted daily at 11pm.");
+}
+
+function installAllTriggers() {
+  installTrigger();
+  installArchiveTrigger();
+  Logger.log("=== ✅ All triggers installed successfully ===");
+}
+
+function removeAllTriggers() {
+  const triggers = ScriptApp.getProjectTriggers();
+  triggers.forEach(function(t) {
+    ScriptApp.deleteTrigger(t);
+  });
+  Logger.log("Removed " + triggers.length + " trigger(s).");
+}
+
+function listTriggers() {
+  const triggers = ScriptApp.getProjectTriggers();
+  Logger.log("=== Active Triggers (" + triggers.length + ") ===");
+
+  if (triggers.length === 0) {
+    Logger.log("No triggers installed. Run installAllTriggers() to set up.");
+    return;
+  }
+
+  triggers.forEach(function(t, i) {
+    Logger.log((i + 1) + ". " + t.getHandlerFunction() +
+      " | Event: " + t.getEventType() +
+      " | Source: " + t.getTriggerSource());
+  });
+}
+
+// ============================================================
+// UTILITY FUNCTIONS
+// ============================================================
+
+// Refresh row colors based on current Queue values
+// Run after sorting/filtering causes color mismatches
+function refreshSheetColors() {
+  Logger.log("=== Refreshing sheet colors ===");
+  const startTime = new Date();
+
+  const sheet = getSheet();
+  const lastRow = sheet.getLastRow();
+
+  if (lastRow < 2) {
+    Logger.log("No data rows to refresh.");
+    return;
+  }
+
+  const data = sheet.getRange(2, 1, lastRow - 1, 10).getValues();
+
+  const colors = {
+    "Dispute": "#fce8e6",
+    "Update Details": "#e8f0fe",
+    "Invoice": "#e6f4ea",
+    "Internal Invoice": "#fef7e0",
+    "Others": "#f1f3f4",
+  };
+
+  const backgrounds = data.map(row => {
+    const queue = row[4];
+    const color = colors[queue] || "#ffffff";
+    return Array(10).fill(color);
+  });
+
+  sheet.getRange(2, 1, data.length, 10).setBackgrounds(backgrounds);
+
+  const duration = (new Date() - startTime) / 1000;
+  Logger.log(`✅ Refreshed colors for ${data.length} rows in ${duration}s`);
+}
+
+// Debug archive — shows which cases would be archived
+function debugArchive() {
+  const sheet = getSheet();
+  const data = sheet.getDataRange().getValues();
+
+  Logger.log("=== Archive Debug ===");
+  Logger.log("Total data rows: " + (data.length - 1));
+
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - CONFIG.ARCHIVE_AFTER_DAYS);
+  cutoff.setHours(0, 0, 0, 0);
+  Logger.log("Cutoff date (must be older than): " + Utilities.formatDate(cutoff, Session.getScriptTimeZone(), "dd/MM/yyyy"));
+  Logger.log("Today: " + Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "dd/MM/yyyy"));
+
+  let totalCompleted = 0;
+  let oldEnoughToArchive = 0;
+
+  for (let i = 1; i < data.length; i++) {
+    const status = data[i][5];
+    const completedAtRaw = data[i][8];
+    const caseId = data[i][0];
+
+    if (status !== "Completed") continue;
+    totalCompleted++;
+
+    if (!completedAtRaw) {
+      Logger.log("⚠️  " + caseId + " — Completed At is empty");
+      continue;
+    }
+
+    let completedDate;
+    if (completedAtRaw instanceof Date) {
+      completedDate = completedAtRaw;
+    } else {
+      const dateStr = String(completedAtRaw).split(" ")[0];
+      const parts = dateStr.split("/");
+      if (parts.length === 3) {
+        completedDate = new Date(parts[2] + "-" + parts[1] + "-" + parts[0]);
+      } else {
+        completedDate = new Date(dateStr);
+      }
+    }
+
+    if (isNaN(completedDate.getTime())) {
+      Logger.log("❌ Parse failed for " + caseId);
+      continue;
+    }
+
+    const completedDateFmt = Utilities.formatDate(completedDate, Session.getScriptTimeZone(), "dd/MM/yyyy");
+    const ageInDays = Math.floor((new Date() - completedDate) / (1000 * 60 * 60 * 24));
+
+    if (completedDate < cutoff) {
+      oldEnoughToArchive++;
+      Logger.log("✅ " + caseId + " — completed " + completedDateFmt + " (" + ageInDays + " days ago) → SHOULD ARCHIVE");
+    } else {
+      Logger.log("⏳ " + caseId + " — completed " + completedDateFmt + " (" + ageInDays + " days ago) → too recent, keep");
+    }
+  }
+
+  Logger.log("\n=== Summary ===");
+  Logger.log("Total Completed cases: " + totalCompleted);
+  Logger.log(`Old enough to archive (>${CONFIG.ARCHIVE_AFTER_DAYS} day(s)): ` + oldEnoughToArchive);
+}
+
+// Diagnose empty/corrupted rows in the sheet
+function diagnoseEmptyRows() {
+  const sheet = getSheet();
+  const data = sheet.getDataRange().getValues();
+
+  Logger.log("=== Sheet Health Check ===");
+  Logger.log("Total rows: " + data.length);
+  Logger.log("Headers: " + JSON.stringify(data[0]));
+
+  let emptyRows = 0;
+  let inProgressRows = 0;
+  let inProgressEmpty = 0;
+
+  for (let i = 1; i < data.length; i++) {
+    const caseId = data[i][0];
+    const status = data[i][5];
+
+    if (!caseId || caseId === "") {
+      emptyRows++;
+      Logger.log("⚠️ Empty row at " + (i + 1) + ": " + JSON.stringify(data[i]));
+    }
+
+    if (status === "In Progress") {
+      inProgressRows++;
+      if (!caseId) {
+        inProgressEmpty++;
+        Logger.log("❌ Row " + (i + 1) + " has Status=In Progress but no Case ID!");
+      }
+    }
+  }
+
+  Logger.log("\n=== Summary ===");
+  Logger.log("Total empty rows (no Case ID): " + emptyRows);
+  Logger.log("Total In Progress: " + inProgressRows);
+  Logger.log("In Progress with no Case ID: " + inProgressEmpty);
+}
+
+// Remove rows with empty Case ID
+function cleanupCorruptedRows() {
+  const sheet = getSheet();
+  const data = sheet.getDataRange().getValues();
+  const rowsToDelete = [];
+
+  for (let i = data.length - 1; i >= 1; i--) {
+    const caseId = data[i][0];
+    if (!caseId || String(caseId).trim() === "") {
+      rowsToDelete.push(i + 1);
+      Logger.log("Will delete corrupted row " + (i + 1));
+    }
+  }
+
+  rowsToDelete.forEach(row => sheet.deleteRow(row));
+  Logger.log("Cleaned up " + rowsToDelete.length + " corrupted row(s).");
+}
+
+// Remove extra columns beyond column J (10)
+function cleanupExtraColumns() {
+  const sheet = getSheet();
+  const lastCol = sheet.getLastColumn();
+
+  if (lastCol > 10) {
+    sheet.deleteColumns(11, lastCol - 10);
+    Logger.log("Deleted " + (lastCol - 10) + " extra columns. Sheet now has 10 columns.");
+  } else {
+    Logger.log("No extra columns to delete.");
+  }
+}
+
+// Convert existing dates to DD/MM/YYYY format
+// Date Received → date only; Assigned At / Completed At → date + time
+function convertExistingDatesToNewFormat() {
+  const sheet = getSheet();
+  const data = sheet.getDataRange().getValues();
+  const tz = Session.getScriptTimeZone();
+
+  let converted = 0;
+
+  for (let i = 1; i < data.length; i++) {
+    [
+      { idx: 1, format: "dd/MM/yyyy" },        // Date Received: no time
+      { idx: 7, format: "dd/MM/yyyy HH:mm" },   // Assigned At
+      { idx: 8, format: "dd/MM/yyyy HH:mm" },   // Completed At
+    ].forEach(col => {
+      const val = data[i][col.idx];
+      if (!val) return;
+
+      let dateObj;
+      if (val instanceof Date) {
+        dateObj = val;
+      } else {
+        const valStr = String(val);
+        // Match ISO format like "2025-05-19" or "Sat May 10 2025..."
+        if (valStr.match(/^\d{4}-\d{2}-\d{2}/) || valStr.match(/^[A-Z][a-z]{2}\s/)) {
+          dateObj = new Date(valStr);
+        } else {
+          return;
+        }
+      }
+
+      if (!isNaN(dateObj.getTime())) {
+        const newFormat = Utilities.formatDate(dateObj, tz, col.format);
+        sheet.getRange(i + 1, col.idx + 1).setValue(newFormat);
+        converted++;
+      }
+    });
+  }
+
+  Logger.log("Converted " + converted + " date cells");
+}
+
+// Archive test — creates fake old completed cases and verifies archiving
+function testArchive() {
+  Logger.log("=== Archive Test Started ===\n");
+  const sheet = getSheet();
+  const archiveSheet = getArchiveSheet();
+
+  const beforeActiveRows = sheet.getLastRow() - 1;
+  const beforeArchivedRows = archiveSheet.getLastRow() - 1;
+  Logger.log("BEFORE:");
+  Logger.log("  Active sheet rows: " + beforeActiveRows);
+  Logger.log("  Archive sheet rows: " + beforeArchivedRows);
+
+  const tz = Session.getScriptTimeZone();
+  const now = new Date();
+
+  // 5 days ago — should be archived (older than 1-day cutoff)
+  const oldDate = new Date(now);
+  oldDate.setDate(oldDate.getDate() - 5);
+  const oldCompletedAt = Utilities.formatDate(oldDate, tz, "dd/MM/yyyy HH:mm");
+
+  // Today — should NOT be archived
+  const todayCompletedAt = Utilities.formatDate(now, tz, "dd/MM/yyyy HH:mm");
+  const todayDate = Utilities.formatDate(now, tz, "dd/MM/yyyy");
+
+  const testRows = [
+    // Should archive
+    ["ARCHTEST-001", todayDate, "old.user.1@test.com", "[ARCHTEST] Old case 1", "Dispute", "Completed", "tester@grab.com", oldCompletedAt, oldCompletedAt, "https://mail.google.com"],
+    ["ARCHTEST-002", todayDate, "old.user.2@test.com", "[ARCHTEST] Old case 2", "Invoice", "Completed", "tester@grab.com", oldCompletedAt, oldCompletedAt, "https://mail.google.com"],
+
+    // Should NOT archive (completed today)
+    ["ARCHTEST-003", todayDate, "today.user@test.com", "[ARCHTEST] Today completed", "Invoice", "Completed", "tester@grab.com", todayCompletedAt, todayCompletedAt, "https://mail.google.com"],
+
+    // Should NOT archive (in progress)
+    ["ARCHTEST-004", todayDate, "stuck.user@test.com", "[ARCHTEST] In progress", "Others", "In Progress", "tester@grab.com", oldCompletedAt, "", "https://mail.google.com"],
+
+    // Should NOT archive (new)
+    ["ARCHTEST-005", todayDate, "new.user@test.com", "[ARCHTEST] Brand new", "Others", "New", "", "", "", "https://mail.google.com"]
+  ];
+
+  const startRow = sheet.getLastRow() + 1;
+  sheet.getRange(startRow, 1, testRows.length, 10).setValues(testRows);
+  testRows.forEach((row, i) => applyQueueColor(sheet, startRow + i, row[4]));
+  Logger.log("\n✅ Created 5 test cases (2 should archive, 3 should not)");
+
+    // Run archive
+  Logger.log("\n--- Running archiveOldCompleted() ---");
+  archiveOldCompleted();
+
+  const afterActiveRows = sheet.getLastRow() - 1;
+  const afterArchivedRows = archiveSheet.getLastRow() - 1;
+  Logger.log("\nAFTER:");
+  Logger.log("  Active sheet rows: " + afterActiveRows + " (was " + beforeActiveRows + ")");
+  Logger.log("  Archive sheet rows: " + afterArchivedRows + " (was " + beforeArchivedRows + ")");
+
+  const activeRowDelta = afterActiveRows - beforeActiveRows;
+  const archivedRowDelta = afterArchivedRows - beforeArchivedRows;
+
+  // Added 5, expected 2 to archive → active +3, archive +2
+  Logger.log("\n=== Verification ===");
+  if (activeRowDelta === 3 && archivedRowDelta === 2) {
+    Logger.log("✅ PASS: Active sheet gained " + activeRowDelta + " rows (expected 3)");
+    Logger.log("✅ PASS: Archive sheet gained " + archivedRowDelta + " rows (expected 2)");
+    Logger.log("✅ Archive function works correctly!");
+  } else {
+    Logger.log("❌ FAIL: Active delta=" + activeRowDelta + " (expected 3), Archive delta=" + archivedRowDelta + " (expected 2)");
+  }
+
+  Logger.log("\n=== Test Done. Run cleanupArchiveTest() to remove ARCHTEST-* rows ===");
+}
+
+// Cleanup ARCHTEST-* rows from BOTH sheets
+function cleanupArchiveTest() {
+  Logger.log("=== Cleaning up archive test data ===");
+
+  const sheet = getSheet();
+  const archiveSheet = getArchiveSheet();
+  let activeDeleted = 0;
+  let archiveDeleted = 0;
+
+  // Clean active sheet
+  const activeData = sheet.getDataRange().getValues();
+  for (let i = activeData.length - 1; i >= 1; i--) {
+    if (String(activeData[i][0]).startsWith("ARCHTEST-")) {
+      sheet.deleteRow(i + 1);
+      activeDeleted++;
+    }
+  }
+
+  // Clean archive sheet
+  if (archiveSheet.getLastRow() > 1) {
+    const archiveData = archiveSheet.getDataRange().getValues();
+    for (let i = archiveData.length - 1; i >= 1; i--) {
+      if (String(archiveData[i][0]).startsWith("ARCHTEST-")) {
+        archiveSheet.deleteRow(i + 1);
+        archiveDeleted++;
+      }
+    }
+  }
+
+  Logger.log("✅ Removed " + activeDeleted + " from active sheet");
+  Logger.log("✅ Removed " + archiveDeleted + " from archive sheet");
+  Logger.log("=== Cleanup done ===");
+}
+
+function testFindRow() {
+  const sheet = getSheet();
+  const data = sheet.getRange(2, 1, Math.min(5, sheet.getLastRow() - 1), 1).getValues();
+  
+  Logger.log("=== Testing findRowByCaseId ===");
+  Logger.log("First 5 Case IDs in sheet:");
+  data.forEach((row, i) => {
+    Logger.log("  Row " + (i + 2) + ": " + row[0]);
+  });
+  
+  if (data.length > 0) {
+    const testCaseId = data[0][0];
+    Logger.log("\nTesting lookup of: " + testCaseId);
+    const foundRow = findRowByCaseId(testCaseId);
+    Logger.log("Found at row: " + foundRow);
+    
+    if (foundRow === 2) {
+      Logger.log("✅ findRowByCaseId works correctly");
+    } else {
+      Logger.log("❌ Expected row 2, got row " + foundRow);
+    }
+  }
+}
+
+function testAssignManually() {
+  const sheet = getSheet();
+  const data = sheet.getDataRange().getValues();
+  
+  let testCaseId = null;
+  for (let i = 1; i < data.length; i++) {
+    if (data[i][5] === "New") {
+      testCaseId = data[i][0];
+      Logger.log("Will test assignCase with: " + testCaseId);
+      break;
+    }
+  }
+  
+  if (!testCaseId) {
+    Logger.log("No 'New' case found");
+    return;
+  }
+  
+  try {
+    const result = assignCase(testCaseId);
+    Logger.log("✅ assignCase succeeded: " + JSON.stringify(result));
+  } catch (e) {
+    Logger.log("❌ Error: " + e.message);
+  }
+}
+
+// Standardize all Date Received values to DD/MM/YYYY (no time)
+function refreshDateReceivedFormat() {
+  Logger.log("=== Refreshing Date Received format to DD/MM/YYYY ===");
+  const sheet = getSheet();
+  const lastRow = sheet.getLastRow();
+  
+  if (lastRow < 2) {
+    Logger.log("No data rows.");
+    return;
+  }
+  
+  const tz = Session.getScriptTimeZone();
+  
+  // Read all Date Received values (column B = column 2)
+  const range = sheet.getRange(2, 2, lastRow - 1, 1);
+  const values = range.getValues();
+  
+  let converted = 0;
+  let skipped = 0;
+  let failed = 0;
+  
+  const newValues = values.map(function(row) {
+    const val = row[0];
+    if (!val) {
+      skipped++;
+      return [val];
+    }
+    
+    let dateObj;
+    
+    // Case 1: Already a Date object
+    if (val instanceof Date) {
+      dateObj = val;
+    }
+    // Case 2: String — try to parse various formats
+    else {
+      const valStr = String(val).trim();
+      
+      // Already in DD/MM/YYYY format (no time)?
+      if (/^\d{2}\/\d{2}\/\d{4}$/.test(valStr)) {
+        skipped++;
+        return [valStr];
+      }
+      
+      // DD/MM/YYYY with time — strip time
+      if (/^\d{2}\/\d{2}\/\d{4}\s/.test(valStr)) {
+        const dateOnly = valStr.split(" ")[0];
+        converted++;
+        return [dateOnly];
+      }
+      
+      // ISO format like 2025-05-19T07:37:00.000Z or 2025-05-19 14:37
+      if (/^\d{4}-\d{2}-\d{2}/.test(valStr)) {
+        dateObj = new Date(valStr);
+      }
+      // Sat May 10 2025 10:00:00 GMT+0700 format
+      else if (/^[A-Z][a-z]{2}\s/.test(valStr)) {
+        dateObj = new Date(valStr);
+      }
+      // Try generic parse
+      else {
+        dateObj = new Date(valStr);
+      }
+    }
+    
+    if (!dateObj || isNaN(dateObj.getTime())) {
+      failed++;
+      Logger.log("⚠️ Could not parse: " + JSON.stringify(val));
+      return [val]; // keep original
+    }
+    
+    // Format as DD/MM/YYYY
+    const newFormat = Utilities.formatDate(dateObj, tz, "dd/MM/yyyy");
+    converted++;
+    return [newFormat];
+  });
+  
+  // Write all back in ONE batch
+  range.setValues(newValues);
+  
+  Logger.log(`✅ Converted: ${converted}`);
+  Logger.log(`⏭️ Skipped (already correct): ${skipped}`);
+  Logger.log(`❌ Failed to parse: ${failed}`);
+  Logger.log("=== Done ===");
+}
+// Main function — refreshes email links in BOTH Cases and Archive sheets
+function refreshEmailLinksToSearch() {
+  Logger.log("=== Refreshing email links to search-based format ===");
+  const tz = Session.getScriptTimeZone();
+  
+  const casesSheet = getSheet();
+  const casesUpdated = refreshLinksInSheet(casesSheet, "Cases", 10, tz);
+  
+  const archiveSheet = getArchiveSheet();
+  const archiveUpdated = refreshLinksInSheet(archiveSheet, "Archive", 11, tz);
+  
+  Logger.log(`\n=== Total Summary ===`);
+  Logger.log(`Cases sheet: ${casesUpdated} links updated`);
+  Logger.log(`Archive sheet: ${archiveUpdated} links updated`);
+  Logger.log(`=== Done ===`);
+}
+
+// Helper — refreshes links in a single sheet (uses buildSearchLink for consistency)
+function refreshLinksInSheet(sheet, sheetName, totalColumns, tz) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) {
+    Logger.log(`[${sheetName}] No data rows.`);
+    return 0;
+  }
+  
+  Logger.log(`\n--- Processing ${sheetName} (${lastRow - 1} rows) ---`);
+  
+  const data = sheet.getRange(2, 1, lastRow - 1, totalColumns).getValues();
+  
+  let updated = 0;
+  let skipped = 0;
+  
+  const newLinks = data.map(function(row) {
+    const dateReceived = row[1];  // Column B
+    const sender = row[2];         // Column C
+    const subject = row[3];        // Column D
+    const currentLink = row[9];    // Column J
+    
+    if (!subject) {
+      skipped++;
+      return [currentLink];
+    }
+    
+    // Use the same helper function as checkNewEmails for consistency
+    const newLink = buildSearchLink(sender, subject, dateReceived, tz);
+    
+    updated++;
+    return [newLink];
+  });
+  
+  // Write back to column J only
+  sheet.getRange(2, 10, newLinks.length, 1).setValues(newLinks);
+  
+  Logger.log(`[${sheetName}] ✅ Updated: ${updated}`);
+  Logger.log(`[${sheetName}] ⏭️ Skipped: ${skipped}`);
+  
+  return updated;
+}
+
+
+function checkSystemDate() {
+  Logger.log("Current Date: " + new Date());
+  Logger.log("Year: " + new Date().getFullYear());
+  Logger.log("Timezone: " + Session.getScriptTimeZone());
+}
+
+function testDateParser() {
+  Logger.log("=== Testing Date Parser ===");
+  
+  const tests = [
+    "20/05/2026",
+    "2026-05-20",
+    "2026/05/20",
+    "20-05-2026",
+    "20.05.2026",
+    "Sat May 10 2025 10:00:00 GMT+0700",
+    "2026-05-19T07:37:00.000Z",
+    "13/05/2026",      // DD/MM > 12, valid
+    "05/13/2026",      // MM > 12, should swap to DD/MM
+    "invalid",
+    "",
+    null,
+    new Date(),
+  ];
+  
+  tests.forEach(input => {
+    const result = parseDateFlexible(input);
+    const formatted = result ? Utilities.formatDate(result, Session.getScriptTimeZone(), "yyyy-MM-dd") : "null";
+    Logger.log(`Input: "${input}" → ${formatted}`);
+  });
+}
+
+function diagnoseSpecificEmail() {
+  const sheet = getSheet();
+  const data = sheet.getDataRange().getValues();
+  
+  Logger.log("=== Looking for [GF-KAM] GMS Request Invoice ===\n");
+  
+  for (let i = 1; i < data.length; i++) {
+    const subject = String(data[i][3] || "");
+    if (subject.includes("GMS Request Invoice")) {
+      Logger.log("Row " + (i + 1) + ":");
+      Logger.log("  Subject: " + subject);
+      Logger.log("  Date raw: " + JSON.stringify(data[i][1]));
+      Logger.log("  Date type: " + typeof data[i][1]);
+      Logger.log("  Is Date object: " + (data[i][1] instanceof Date));
+      
+      if (data[i][1] instanceof Date) {
+        Logger.log("  Date value: " + data[i][1]);
+        Logger.log("  Year: " + data[i][1].getFullYear());
+        Logger.log("  Month: " + (data[i][1].getMonth() + 1));
+        Logger.log("  Day: " + data[i][1].getDate());
+      }
+      Logger.log("");
+    }
+  }
+}
+
+function testSenderImpact() {
+  Logger.log("=== Testing sender filter impact ===");
+  
+  // Pick a few random rows
+  const sheet = getSheet();
+  const data = sheet.getDataRange().getValues();
+  const testRows = [10, 50, 100, 150, 200];
+  
+  testRows.forEach(rowIdx => {
+    if (rowIdx >= data.length) return;
+    
+    const row = data[rowIdx];
+    const sender = row[2];
+    const subject = row[3];
+    
+    Logger.log("\nRow " + (rowIdx + 1));
+    Logger.log("  Subject: " + subject);
+    Logger.log("  Sender: " + sender);
+    
+    // Test sender extraction
+    const senderMatch = String(sender).match(/<([^>]+)>/);
+    const fromAddr = senderMatch ? senderMatch[1] : String(sender);
+    Logger.log("  Extracted: " + fromAddr);
+    
+    const isGroup = fromAddr.toLowerCase().includes(CONFIG.GROUP_EMAIL.toLowerCase());
+    Logger.log("  Is group email: " + isGroup);
+    
+    Logger.log("  Recommendation: " + (isGroup ? "Skip sender" : "Use sender"));
+  });
+}

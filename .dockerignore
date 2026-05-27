@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+*.db
+credentials.json
+token.json
+service_account.json
+.streamlit/secrets.toml
+gmail_auth.ipynb
+gmail-reclassify.ipynb
+inbox.mbox
+scripts/
+*.bat
+*.ps1
+.git/

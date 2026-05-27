@@ -1,0 +1,51 @@
+stages:
+  - build
+  - deploy
+
+variables:
+  IMAGE_URI: 011014824127.dkr.ecr.ap-southeast-1.amazonaws.com/gmail-classifier
+  AWS_ROLE_ARN: arn:aws:iam::011014824127:role/your-custom-gitlab-ci-role  # update this once admin creates the role
+
+build:
+  stage: build
+  image: bentolor/docker-dind-awscli:2.5.3
+  services:
+    - docker:27-dind
+  variables:
+    DOCKER_TLS_CERTDIR: "/certs"
+  id_tokens:
+    GITLAB_OIDC_TOKEN:
+      aud: https://gitlab.myteksi.net
+  before_script:
+    - >
+      STS=($(aws sts assume-role-with-web-identity
+      --role-arn $AWS_ROLE_ARN
+      --role-session-name "GitLabRunner-${CI_PROJECT_ID}-${CI_PIPELINE_ID}"
+      --web-identity-token ${GITLAB_OIDC_TOKEN}
+      --duration-seconds 3600
+      --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]'
+      --output text))
+    - export AWS_ACCESS_KEY_ID="${STS[0]}"
+    - export AWS_SECRET_ACCESS_KEY="${STS[1]}"
+    - export AWS_SESSION_TOKEN="${STS[2]}"
+    - aws ecr get-login-password --region ap-southeast-1 | docker login --username AWS --password-stdin 011014824127.dkr.ecr.ap-southeast-1.amazonaws.com
+  script:
+    - docker build -t $IMAGE_URI:$CI_COMMIT_SHORT_SHA .
+    - docker tag $IMAGE_URI:$CI_COMMIT_SHORT_SHA $IMAGE_URI:latest
+    - docker push $IMAGE_URI:$CI_COMMIT_SHORT_SHA
+    - docker push $IMAGE_URI:latest
+  only:
+    - main
+    - master
+
+deploy:
+  stage: deploy
+  image: bitnami/kubectl:latest
+  before_script:
+    - kubectl config use-context $KUBE_CONTEXT
+  script:
+    - kubectl set image deployment/gmail-classifier gmail-classifier=$IMAGE_URI:$CI_COMMIT_SHORT_SHA -n dispute-tools
+    - kubectl rollout status deployment/gmail-classifier -n dispute-tools
+  only:
+    - main
+    - master

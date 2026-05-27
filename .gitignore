@@ -20,3 +20,6 @@ inbox.mbox
 # Streamlit secrets — NEVER commit
 .streamlit/secrets.toml
 .streamlit/google_credentials.json
+
+# IDE / tooling
+.claude/

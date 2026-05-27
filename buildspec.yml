@@ -1,0 +1,15 @@
+version: 0.2
+
+phases:
+  pre_build:
+    commands:
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+      - IMAGE_URI=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/gmail-classifier
+  build:
+    commands:
+      - docker build -t $IMAGE_URI:$CODEBUILD_RESOLVED_SOURCE_VERSION .
+      - docker tag $IMAGE_URI:$CODEBUILD_RESOLVED_SOURCE_VERSION $IMAGE_URI:latest
+  post_build:
+    commands:
+      - docker push $IMAGE_URI:$CODEBUILD_RESOLVED_SOURCE_VERSION
+      - docker push $IMAGE_URI:latest

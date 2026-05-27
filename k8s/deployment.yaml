@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gmail-classifier
+  namespace: dispute-tools
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gmail-classifier
+  template:
+    metadata:
+      labels:
+        app: gmail-classifier
+    spec:
+      containers:
+        - name: gmail-classifier
+          image: 011014824127.dkr.ecr.ap-southeast-1.amazonaws.com/gmail-classifier:v1
+          ports:
+            - containerPort: 8080
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          volumeMounts:
+            - name: google-credentials
+              mountPath: /app/service_account.json
+              subPath: service_account.json
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /_stcore/health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /_stcore/health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 30
+      volumes:
+        - name: google-credentials
+          secret:
+            secretName: google-credentials

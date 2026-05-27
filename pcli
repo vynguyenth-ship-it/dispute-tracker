@@ -1,0 +1,1086 @@
+﻿#!/bin/bash
+export PATH="$PATH:."
+# pcli - Standalone Palana CLI for remote cluster agent management
+# Standalone after 'pcli sync' — fetches templates from agent-api
+set -e
+# Detect interactive mode (TTY on stdout)
+if [[ -t 1 ]]; then
+PCLI_INTERACTIVE=1
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+NC='\033[0m'
+else
+PCLI_INTERACTIVE=0
+GREEN='' BLUE='' YELLOW='' RED='' NC=''
+fi
+echo_step() { echo -e "${BLUE}→${NC} $1" >&2; }
+echo_pass() { echo -e "${GREEN}✓${NC} $1"; }
+echo_warn() { echo -e "${YELLOW}⚠${NC} $1"; }
+echo_fail() { echo -e "${RED}✗${NC} $1"; }
+# Resource bounds match the agent-api server-side validators
+# (cpuMilliMin/Max, memoryMiMin/Max in cmd/agent-api/resources.go) and the
+# UserAgent CR webhook (api/v1/agent_webhook.go). Catching garbage client-side
+# avoids a panic in mustParseQuantity if the user typos a value.
+PCLI_CPU_MILLI_MIN=100
+PCLI_CPU_MILLI_MAX=8000
+PCLI_MEM_MI_MIN=128
+PCLI_MEM_MI_MAX=8192
+# Validates a CPU value as a plain integer in millicores. Used by cmd_create
+# (positional arg goes straight into the CR's spec.resources.cpu_limit, which
+# is documented as int millicores). Empty input is treated as "use default".
+validate_cpu_milli() {
+local raw="$1"
+[[ -z "$raw" ]] && return 0
+if ! [[ "$raw" =~ ^[0-9]+$ ]]; then
+echo_fail "cpu must be a plain integer (millicores), got '$raw' — example: 1500"
+return 1
+fi
+if [[ "$raw" -lt $PCLI_CPU_MILLI_MIN || "$raw" -gt $PCLI_CPU_MILLI_MAX ]]; then
+echo_fail "cpu must be between $PCLI_CPU_MILLI_MIN and $PCLI_CPU_MILLI_MAX millicores, got $raw"
+return 1
+fi
+return 0
+}
+# Validates a Memory value as a plain integer in Mi. Used by cmd_create.
+validate_memory_mi() {
+local raw="$1"
+[[ -z "$raw" ]] && return 0
+if ! [[ "$raw" =~ ^[0-9]+$ ]]; then
+echo_fail "memory must be a plain integer (Mi), got '$raw' — example: 4096"
+return 1
+fi
+if [[ "$raw" -lt $PCLI_MEM_MI_MIN || "$raw" -gt $PCLI_MEM_MI_MAX ]]; then
+echo_fail "memory must be between $PCLI_MEM_MI_MIN and $PCLI_MEM_MI_MAX Mi, got $raw"
+return 1
+fi
+return 0
+}
+# Validates a CPU value as a k8s quantity string (e.g. 1500m, 2, 2.5). Used by
+# cmd_run / cmd_deploy where the value is sent as a quantity string in the
+# Deployment YAML or (Phase 3) overrides.cpu in the deploy request.
+validate_cpu_quantity() {
+local raw="$1"
+[[ -z "$raw" ]] && return 0
+local milli
+if [[ "$raw" =~ ^([0-9]+)m$ ]]; then
+milli="${BASH_REMATCH[1]}"
+elif [[ "$raw" =~ ^([0-9]+)$ ]]; then
+milli=$(( ${BASH_REMATCH[1]} * 1000 ))
+elif [[ "$raw" =~ ^([0-9]+).([0-9]+)$ ]]; then
+local int_part="${BASH_REMATCH[1]}" frac_part="${BASH_REMATCH[2]}"
+frac_part="${frac_part}000"
+frac_part="${frac_part:0:3}"
+milli=$(( 10#$int_part * 1000 + 10#$frac_part ))
+else
+echo_fail "invalid cpu value '$raw' — expected k8s quantity (e.g. 1000m, 2, 2.5)"
+return 1
+fi
+if [[ "$milli" -lt $PCLI_CPU_MILLI_MIN || "$milli" -gt $PCLI_CPU_MILLI_MAX ]]; then
+echo_fail "cpu must be between ${PCLI_CPU_MILLI_MIN}m and ${PCLI_CPU_MILLI_MAX}m, got ${milli}m"
+return 1
+fi
+return 0
+}
+# Validates a Memory value as a k8s quantity string (e.g. 2Gi, 512Mi).
+validate_memory_quantity() {
+local raw="$1"
+[[ -z "$raw" ]] && return 0
+local mi
+if [[ "$raw" =~ ^([0-9]+)(Mi|M|MB)$ ]]; then
+mi="${BASH_REMATCH[1]}"
+elif [[ "$raw" =~ ^([0-9]+)(Gi|G|GB)$ ]]; then
+mi=$(( ${BASH_REMATCH[1]} * 1024 ))
+elif [[ "$raw" =~ ^([0-9]+)$ ]]; then
+mi="${BASH_REMATCH[1]}"
+else
+echo_fail "invalid memory value '$raw' — expected k8s quantity (e.g. 2Gi, 512Mi, 1024)"
+return 1
+fi
+if [[ "$mi" -lt $PCLI_MEM_MI_MIN || "$mi" -gt $PCLI_MEM_MI_MAX ]]; then
+echo_fail "memory must be between ${PCLI_MEM_MI_MIN}Mi and ${PCLI_MEM_MI_MAX}Mi, got ${mi}Mi"
+return 1
+fi
+return 0
+}
+contains_help() {
+for arg in "$@"; do
+if [[ "$arg" == "--help" || "$arg" == "-h" ]]; then
+return 0
+fi
+done
+return 1
+}
+# Phase 3: pcli can call POST /api/v1/agents/{agent}/deploy directly when the
+# request can be expressed as {template, overrides} — same code path the portal
+# uses. Falls back to legacy YAML+/apply for the advanced cases (custom image,
+# additional --port mappings) until those land in /deploy too. Disable the
+# new path entirely with PCLI_USE_DEPLOY=0.
+#
+# Conditions (all must hold):
+# - PCLI_USE_DEPLOY != "0"
+# - manifest_name is set (server resolves the template)
+# - no custom image (positional arg or --image flag) — manifest's image is canonical
+# - no extra --port specs beyond the manifest's web_port
+# - --no-secrets is NOT set: /deploy enforces "manifest has required secrets,
+# you must claim they're written"; --no-secrets is incompatible with that.
+# Legacy /apply has looser semantics, so fall back to it when --no-secrets.
+pcli_can_use_deploy_endpoint() {
+local manifest_name="$1" custom_image="$2" user_specified_ports="$3" no_secrets="$4"
+[[ "${PCLI_USE_DEPLOY:-1}" != "0" ]] || return 1
+[[ -n "$manifest_name" ]] || return 1
+[[ "$custom_image" -eq 0 ]] || return 1
+[[ "$user_specified_ports" -eq 0 ]] || return 1
+[[ "$no_secrets" -eq 0 ]] || return 1
+return 0
+}
+# Builds the JSON body for POST /api/v1/agents/{agent}/deploy. Only sets fields
+# that the caller marked as explicit overrides — empty fields fall through to
+# the server's CR/manifest precedence (see docs/per-agent-resources.md).
+#
+# Args: template no_secrets cpu cpu_explicit memory memory_explicit
+# container_command replace expected_keys_csv
+pcli_build_deploy_body() {
+local template="$1" no_secrets="$2"
+local cpu="$3" cpu_explicit="$4"
+local memory="$5" memory_explicit="$6"
+local container_command="$7" replace="$8"
+local expected_keys_csv="${9:-}"
+local secrets_written="true"
+[[ "$no_secrets" -eq 1 ]] && secrets_written="false"
+local jq_args=(
+--arg template "$template"
+--argjson secrets_written "$secrets_written"
+)
+local jq_filter='{template:$template, secrets_written:$secrets_written}'
+if [[ -n "$expected_keys_csv" ]]; then
+jq_args+=(--arg keys "$expected_keys_csv")
+jq_filter="$jq_filter | .expected_secret_keys = (\$keys | split(\",\") | map(select(length > 0)))"
+fi
+local override_filter=""
+if [[ "$cpu_explicit" -eq 1 ]]; then
+jq_args+=(--arg cpu "$cpu")
+override_filter="$override_filter | .cpu = \$cpu"
+fi
+if [[ "$memory_explicit" -eq 1 ]]; then
+jq_args+=(--arg memory "$memory")
+override_filter="$override_filter | .memory = \$memory"
+fi
+if [[ -n "$container_command" ]]; then
+jq_args+=(--arg cmd "$container_command")
+override_filter="$override_filter | .command = [\"/bin/sh\", \"-c\", \$cmd]"
+fi
+if [[ "$replace" -eq 1 ]]; then
+override_filter="$override_filter | .replace = true"
+fi
+if [[ -n "$override_filter" ]]; then
+jq_filter="$jq_filter | .overrides = ({} ${override_filter})"
+fi
+jq -n "${jq_args[@]}" "$jq_filter"
+}
+# POSTs the deploy body to /api/v1/agents/{agent}/deploy. Returns 0 on 2xx,
+# 1 on any failure (HTTP error, non-2xx response, body parse failure). Echoes
+# the server's response body on success and the error message on failure.
+pcli_post_deploy() {
+local agent="$1" body="$2"
+local resp status response_body
+resp=$(api_call POST "/api/v1/agents/${agent}/deploy" "$body")
+status=$(echo "$resp" | tail -1)
+response_body=$(echo "$resp" | sed '$d')
+if [[ "$status" -ge 200 && "$status" -lt 300 ]] 2>/dev/null; then
+echo "$response_body"
+return 0
+fi
+local err_msg
+err_msg=$(echo "$response_body" | jq -r '.error // empty' 2>/dev/null)
+[[ -z "$err_msg" ]] && err_msg="$response_body"
+echo_fail "Deploy via /deploy failed: $err_msg (HTTP $status)"
+return 1
+}
+# Palana config directory for OAuth tokens etc.
+PALANA_CONFIG_DIR="${HOME}/.palana"
+PALANA_KUBECONFIG="${HOME}/.palana/kubeconfig"
+mkdir -p "${HOME}/.palana"
+export KUBECONFIG="$PALANA_KUBECONFIG"
+# Concedo OIDC configuration (using api.grab.com - publicly reachable, issuer matches EKS OIDC provider)
+CONCEDO_ISSUER_URL="${CONCEDO_ISSUER_URL:-https://api.grab.com/concedoidc}"
+CONCEDO_CLIENT_ID="${CONCEDO_CLIENT_ID:-palana}"
+CONCEDO_CLIENT_SECRET="${CONCEDO_CLIENT_SECRET:-}"
+CONCEDO_TOKEN_ENDPOINT="${CONCEDO_TOKEN_ENDPOINT:-${CONCEDO_ISSUER_URL}/token}"
+# Get the current OAuth bearer token from kubeconfig
+get_oauth_token() {
+local ctx=$(kubectl config current-context 2>/dev/null)
+local user=$(kubectl config view -o jsonpath="{.contexts[?(@.name==\"$ctx\")].context.user}" 2>/dev/null)
+local token
+token=$(kubectl config view --raw -o jsonpath="{.users[?(@.name==\"$user\")].user.token}" 2>/dev/null)
+if [[ -n "$token" ]]; then
+echo "$token"
+return
+fi
+local token_file
+token_file=$(kubectl config view --raw -o jsonpath="{.users[?(@.name==\"$user\")].user.tokenFile}" 2>/dev/null)
+if [[ -n "$token_file" && -f "$token_file" ]]; then
+cat "$token_file"
+fi
+}
+get_oauth_email() {
+local token
+token=$(get_oauth_token)
+local email=""
+if [[ -n "$token" ]]; then
+email=$(jwt_get_field "$token" "email")
+fi
+if [[ -n "$email" ]]; then
+echo "$email"
+else
+get_effective_user_id
+fi
+}
+# Get the agent-api URL (override via config file, otherwise external ingress)
+get_agent_api_url() {
+if [[ -f "${PALANA_CONFIG_DIR}/agent-api-url" ]]; then
+cat "${PALANA_CONFIG_DIR}/agent-api-url"
+return
+fi
+echo "https://agent-api.agent.palana.engtools.net"
+}
+# OIDC callback port for authorization code flow
+CONCEDO_CALLBACK_PORT="${CONCEDO_CALLBACK_PORT:-8765}"
+# Generate PKCE code_verifier and code_challenge (S256)
+generate_pkce() {
+PKCE_VERIFIER=$(openssl rand -base64 48 | tr -d '=+/' | head -c 64)
+PKCE_CHALLENGE=$(printf '%s' "$PKCE_VERIFIER" | openssl dgst -sha256 -binary | openssl base64 -A | tr '+/' '-_' | tr -d '=')
+}
+# Start a temporary HTTP server to receive the OIDC callback, extract code and state
+oidc_callback_server() {
+local port="$1" timeout_secs="${2:-120}"
+python3 -c "
+import http.server, urllib.parse, sys, threading
+class H(http.server.BaseHTTPRequestHandler):
+def do_GET(self):
+p = urllib.parse.urlparse(self.path)
+if p.path != '/callback':
+self.send_error(404)
+return
+qs = urllib.parse.parse_qs(p.query)
+if 'error' in qs:
+self.send_response(400)
+self.send_header('Content-Type','text/html')
+self.end_headers()
+self.wfile.write(b'
+Authorization failed
+Check the terminal.
+')
+print('ERROR:' + qs['error'][0] + ':' + qs.get('error_description',[''])[0])
+return
+code = qs.get('code',[''])[0]
+state = qs.get('state',[''])[0]
+self.send_response(200)
+self.send_header('Content-Type','text/html')
+self.end_headers()
+self.wfile.write(b'
+Authorization successful
+You can close this tab.
+')
+print('CODE:' + code)
+print('STATE:' + state)
+def log_message(self, *a): pass
+
+
+s = http.server.HTTPServer(('127.0.0.1', $port), H)
+t = threading.Timer($timeout_secs, s.shutdown)
+t.daemon = True
+t.start()
+s.handle_request()
+t.cancel()
+" 2>/dev/null
+}
+# Decode JWT payload and extract a field
+jwt_get_field() {
+local token="$1" field="$2"
+local payload=$(echo "$token" | cut -d. -f2)
+local pad=$((4 - ${#payload} % 4))
+if [[ $pad -lt 4 ]]; then
+payload="${payload}$(printf '=%.0s' $(seq 1 $pad))"
+fi
+echo "$payload" | base64 -d 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('$field',''))" 2>/dev/null
+}
+# Store OAuth tokens in kubeconfig and refresh token file
+store_oauth_tokens() {
+local access_token="$1" id_token="$2" refresh_token="$3"
+local kube_token="${id_token:-$access_token}"
+local cluster_name=$(kubectl config current-context 2>/dev/null || kubectl config view -o jsonpath='{.clusters[0].name}' 2>/dev/null || echo "palana")
+local kube_user="oauth-user-${cluster_name}"
+kubectl config set-credentials "$kube_user" --token="$kube_token" 1>/dev/null
+kubectl config set-context "$cluster_name" --user="$kube_user" 1>/dev/null
+kubectl config use-context "$cluster_name" 1>/dev/null
+if [[ -n "$refresh_token" && "$refresh_token" != "" ]]; then
+security add-generic-password -s "palana-refresh-token" -a "$USER" -w "$refresh_token" -U 2>/dev/null
+fi
+local email=$(jwt_get_field "$kube_token" "email")
+local groups=$(jwt_get_field "$kube_token" "groups")
+local iss=$(jwt_get_field "$kube_token" "iss")
+echo ""
+echo_pass "Logged in successfully"
+echo " User: ${email:-unknown}"
+echo " Issuer: ${iss:-unknown}"
+if [[ "$iss" == "https://api.grab.com/concedoidc" ]]; then
+echo_pass "Token issuer matches EKS OIDC provider — direct kubectl should work"
+else
+echo_warn "Token issuer '${iss}' does not match EKS OIDC provider (https://api.grab.com/concedoidc)"
+echo_warn "Direct kubectl may not work; falling back to agent-api routing"
+fi
+echo ""
+echo " Token refreshes automatically via pcli."
+echo " Re-run 'pcli login' if refresh token expires."
+# Initialize user namespace + RBAC so pcli create/list work via kubectl
+local init_response
+init_response=$(api_call "POST" "/api/v1/users/init" 2>/dev/null) || true
+if echo "$init_response" | tail -1 | grep -q "^2"; then
+echo_pass "User namespace initialized"
+fi
+}
+# Check if OAuth token is expired, attempt silent refresh via refresh_token
+check_oauth_token() {
+# In-cluster mode: skip OAuth, use SA token from KUBECONFIG
+if [[ "${PALANA_IN_CLUSTER:-}" == "true" ]]; then
+return 0
+fi
+local current_context=$(kubectl config current-context 2>/dev/null)
+local current_user=$(kubectl config view -o jsonpath="{.contexts[?(@.name==\"$current_context\")].context.user}" 2>/dev/null)
+local token=$(kubectl config view --raw -o jsonpath="{.users[?(@.name==\"$current_user\")].user.token}" 2>/dev/null)
+if [[ -z "$token" ]]; then
+echo_fail "No OAuth token found. Run: pcli login"
+exit 1
+fi
+local exp=$(jwt_get_field "$token" "exp")
+local now=$(date +%s)
+if [[ -n "$exp" && "$exp" -gt "$now" ]]; then
+return 0
+fi
+# Token expired — try silent refresh
+local refresh_token=$(security find-generic-password -s "palana-refresh-token" -a "$USER" -w 2>/dev/null)
+if [[ -n "$refresh_token" ]]; then
+echo_step "OAuth token expired, attempting refresh..."
+local secret_param=""
+[[ -n "$CONCEDO_CLIENT_SECRET" ]] && secret_param="-d client_secret=${CONCEDO_CLIENT_SECRET}"
+local response=$(curl -s -X POST "${CONCEDO_TOKEN_ENDPOINT}" \
+-d "grant_type=refresh_token" \
+-d "client_id=${CONCEDO_CLIENT_ID}" \
+$secret_param \
+-d "refresh_token=${refresh_token}" 2>/dev/null)
+local new_token=$(echo "$response" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id_token','') or d.get('access_token',''))" 2>/dev/null)
+local new_refresh=$(echo "$response" | python3 -c "import sys,json; print(json.load(sys.stdin).get('refresh_token',''))" 2>/dev/null)
+if [[ -n "$new_token" && "$new_token" != "" ]]; then
+ kubectl config set-credentials "$current_user" --token="$new_token" 1>/dev/null
+ if [[ -n "$new_refresh" && "$new_refresh" != "" ]]; then
+   security add-generic-password -s "palana-refresh-token" -a "$USER" -w "$new_refresh" -U 2>/dev/null
+ fi
+ echo_pass "Token refreshed"
+ return 0
+fi
+
+fi
+echo_fail "OAuth token expired. Run: pcli login"
+exit 1
+}
+# Check credentials — all users authenticate via OAuth (pcli login)
+check_credentials() {
+check_oauth_token
+}
+# OIDC Authorization Code Flow with PKCE (browser-based)
+cmd_login_oidc() {
+mkdir -p "$PALANA_CONFIG_DIR"
+echo_step "Palana OAuth Login (OIDC Authorization Code Flow)"
+echo ""
+local authorization_endpoint="${CONCEDO_ISSUER_URL}/auth"
+local token_endpoint="${CONCEDO_ISSUER_URL}/token"
+# Step 2: Generate PKCE and state
+generate_pkce
+local state=$(openssl rand -hex 16)
+local redirect_uri="http://localhost:${CONCEDO_CALLBACK_PORT}/callback"
+# Step 3: Build authorize URL
+local params="client_id=${CONCEDO_CLIENT_ID}"
+params="${params}&redirect_uri=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${redirect_uri}',''))" 2>/dev/null)"
+params="${params}&response_type=code"
+params="${params}&scope=openid+profile+email+groups+offline_access"
+params="${params}&state=${state}"
+params="${params}&code_challenge=${PKCE_CHALLENGE}"
+params="${params}&code_challenge_method=S256"
+local authorize_url="${authorization_endpoint}?${params}"
+# Step 4: Open browser
+echo " Opening browser for authentication..."
+if false; then
+open "$authorize_url"
+elif command -v xdg-open &>/dev/null; then
+xdg-open "$authorize_url"
+else
+echo " Open this URL in your browser:"
+echo " $authorize_url"
+fi
+# Step 5: Wait for callback
+echo_step "Waiting for callback on http://localhost:${CONCEDO_CALLBACK_PORT}/callback ..."
+local callback_output
+callback_output=$(oidc_callback_server "$CONCEDO_CALLBACK_PORT" 120)
+local auth_code=$(echo "$callback_output" | grep '^CODE:' | cut -d: -f2-)
+local received_state=$(echo "$callback_output" | grep '^STATE:' | cut -d: -f2-)
+local callback_error=$(echo "$callback_output" | grep '^ERROR:' | cut -d: -f2-)
+if [[ -n "$callback_error" ]]; then
+echo_fail "Authorization error: $callback_error"
+exit 1
+fi
+if [[ -z "$auth_code" ]]; then
+echo_fail "No authorization code received (timeout?)"
+exit 1
+fi
+if [[ "$received_state" != "$state" ]]; then
+echo_fail "State mismatch — possible CSRF attack"
+exit 1
+fi
+# Step 6: Exchange code for tokens
+echo_step "Exchanging authorization code for tokens..."
+local secret_param=""
+[[ -n "$CONCEDO_CLIENT_SECRET" ]] && secret_param="-d client_secret=${CONCEDO_CLIENT_SECRET}"
+local token_response=$(curl -s -X POST "${token_endpoint}" \
+-H "Content-Type: application/x-www-form-urlencoded" \
+-d "grant_type=authorization_code" \
+-d "code=${auth_code}" \
+-d "redirect_uri=${redirect_uri}" \
+-d "code_verifier=${PKCE_VERIFIER}" \
+-d "client_id=${CONCEDO_CLIENT_ID}" \
+$secret_param 2>/dev/null)
+local access_token=$(echo "$token_response" | python3 -c "import sys,json; print(json.load(sys.stdin).get('access_token',''))" 2>/dev/null)
+local id_token=$(echo "$token_response" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id_token',''))" 2>/dev/null)
+local refresh_token=$(echo "$token_response" | python3 -c "import sys,json; print(json.load(sys.stdin).get('refresh_token',''))" 2>/dev/null)
+local error=$(echo "$token_response" | python3 -c "import sys,json; print(json.load(sys.stdin).get('error',''))" 2>/dev/null)
+if [[ -z "$access_token" || -n "$error" ]]; then
+echo_fail "Token exchange failed"
+[[ -n "$error" ]] && echo " Error: $error"
+echo " Response: $token_response"
+exit 1
+fi
+# Step 7: Store tokens
+store_oauth_tokens "$access_token" "$id_token" "$refresh_token"
+}
+# OAuth login via Concedo OIDC Authorization Code Flow with PKCE
+cmd_login_in_cluster() {
+echo_step "In-cluster login (using Kubernetes service account)"
+echo ""
+local user
+# In-cluster mode: try kubectl auth whoami first (requires SelfSubjectReview RBAC)
+# If that fails (due to RBAC), fall back to extracting username from JWT token
+unset KUBECONFIG
+user=$(kubectl auth whoami -o json 2>/dev/null | jq -r '.status.userInfo.username' 2>/dev/null)
+if [[ -z "$user" || "$user" == "null" ]]; then
+# Fallback: extract from JWT token if whoami doesn't have RBAC permissions
+if [[ -f /var/run/secrets/kubernetes.io/serviceaccount/token ]]; then
+local token jwt_payload
+token=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+jwt_payload=$(echo "$token" | cut -d. -f2)
+# Add padding for base64 decode
+jwt_payload="${jwt_payload}$(printf '%*s' $((4 - ${#jwt_payload} % 4)) | tr ' ' '=')"
+user=$(echo "$jwt_payload" | base64 -d 2>/dev/null | jq -r '.sub' 2>/dev/null)
+fi
+fi
+if [[ -z "$user" || "$user" == "null" ]]; then
+echo_fail "SA token invalid — could not determine username from kubectl or JWT"
+exit 1
+fi
+local effective_user="${PALANA_USER:-$user}"
+echo_pass "Authenticated as: $user"
+echo " Effective user: $effective_user"
+echo " Agent: ${PALANA_AGENT:-unknown}"
+echo ""
+local init_response
+init_response=$(api_call "POST" "/api/v1/users/init" 2>/dev/null) || true
+if echo "$init_response" | tail -1 | grep -q "^2"; then
+echo_pass "User namespace initialized"
+fi
+echo ""
+echo_step "Syncing templates..."
+cmd_sync 2>/dev/null || true
+}
+cmd_login() {
+if contains_help "$@"; then
+echo "Usage: pcli login [--in-cluster]"
+echo ""
+echo "Authenticate to the Palana platform."
+echo ""
+echo "Options:"
+echo " --in-cluster Use pod service account (auto-detected inside agent pods)"
+echo ""
+echo "Without --in-cluster: browser-based Concedo OAuth (PKCE)."
+echo "Requires localhost:${CONCEDO_CALLBACK_PORT} for callback."
+echo ""
+echo "Token refreshes automatically. Re-run if refresh token expires."
+exit 0
+fi
+local force_in_cluster=false
+for arg in "$@"; do
+[[ "$arg" == "--in-cluster" ]] && force_in_cluster=true
+done
+if [[ "$force_in_cluster" == "true" ]] || [[ "${PALANA_IN_CLUSTER:-}" == "true" ]] || [[ -f /var/run/secrets/kubernetes.io/serviceaccount/token ]]; then
+cmd_login_in_cluster
+return
+fi
+cmd_login_oidc
+# Auto-sync templates after successful login
+echo ""
+echo_step "Syncing templates..."
+cmd_sync 2>/dev/null || true
+}
+# Check prerequisites
+check_prerequisites() {
+echo_step "Checking prerequisites..."
+local missing=0
+for cmd in kubectl jq curl python3 openssl; do
+if ! command -v "$cmd" &>/dev/null; then
+echo_fail "$cmd not found"
+missing=1
+else
+echo_pass "$cmd found"
+fi
+done
+if ! command -v docker &>/dev/null; then
+echo_warn "Docker not found (needed for rebuild/run commands)"
+else
+echo_pass "Docker found"
+fi
+if [[ $missing -eq 1 ]]; then
+echo_fail "Missing required tools"
+exit 1
+fi
+}
+get_authenticated_user() {
+local current_context=$(kubectl config current-context 2>/dev/null)
+if [[ -z "$current_context" ]]; then
+echo_fail "No kubectl context found"
+exit 1
+fi
+# Use kubectl auth whoami to get the actual API server identity (required for webhook validation)
+local user
+user=$(kubectl auth whoami -o json 2>/dev/null | jq -r '.status.userInfo.username' 2>/dev/null)
+if [[ -z "$user" || "$user" == "null" ]]; then
+# Extract email from OAuth JWT token
+local token
+token=$(get_oauth_token)
+if [[ -n "$token" ]]; then
+user=$(echo "$token" | cut -d. -f2 | python3 -c "import sys,base64,json; d=sys.stdin.read().strip(); d+='='*(4-len(d)%4); print(json.loads(base64.urlsafe_b64decode(d)).get('email',''))" 2>/dev/null)
+fi
+fi
+if [[ -z "$user" || "$user" == "null" ]]; then
+# Fallback: kubeconfig context user
+user=$(kubectl config view -o jsonpath="{.contexts[?(@.name==\"$current_context\")].context.user}" 2>/dev/null)
+fi
+if [[ -z "$user" ]]; then
+echo_fail "Could not determine authenticated user from kubeconfig context: $current_context"
+exit 1
+fi
+echo "$user"
+}
+# Derive user_id for Agent spec from K8s username (matches webhook effectiveUserFromUsername)
+# palana:kevin.littlejohn -> kevin.littlejohn; arn:aws:iam::...:user/kevin.littlejohn -> kevin.littlejohn; etc.
+get_effective_user_id() {
+# Incident-response operators target someone else's agent without changing
+# their own OAuth identity. The server still authenticates the operator;
+# the X-On-Behalf-Of header (set by api_call) tells agent-api whose
+# namespace to act on. Locally we mirror the same override so kubectl
+# commands look at the target user's namespace.
+if [[ -n "${PCLI_ON_BEHALF_OF:-}" ]]; then
+echo "$PCLI_ON_BEHALF_OF"
+return
+fi
+if [[ "${PALANA_IN_CLUSTER:-}" == "true" && -n "${PALANA_USER:-}" ]]; then
+echo "$PALANA_USER"
+return
+fi
+local user
+user=$(get_authenticated_user)
+if [[ "$user" == palana: ]]; then
+echo "${user#palana:}"
+elif [[ "$user" == system:serviceaccount: ]]; then
+# system:serviceaccount:agent-USER-AGENT:agent-sa — extract user from namespace
+local ns
+ns=$(echo "$user" | cut -d: -f3)
+if [[ "$ns" == agent- ]]; then
+local remainder="${ns#agent-}"
+echo "${remainder%-}"
+elif [[ "$ns" == user- ]]; then
+echo "${ns#user-}"
+else
+echo "$user"
+fi
+elif [[ "$user" == "assumed-role/" ]]; then
+echo "${user##/}"
+elif [[ "$user" == "user/" ]]; then
+echo "${user##*/}"
+else
+echo "$user"
+fi
+}
+# Sanitize user ID for k8s namespace/vault compatibility (remove domain, convert dots to dashes)
+# Must match internal/controller/agent_controller.go sanitizeUserID
+# Examples: kevin.littlejohn@grabtaxi.com -> kevin-littlejohn, kevin.littlejohn-grabtaxi.com -> kevin-littlejohn
+sanitize_user_id() {
+local user_id="$1"
+# Remove domain suffix (everything after @)
+user_id="${user_id%@}"
+# Handle hyphenated domain format: kevin.littlejohn-grabtaxi.com -> kevin.littlejohn
+# Find first part that looks like domain.tld (has . with 2-4 char suffix), keep parts before it
+if [[ "$user_id" == "-" ]]; then
+local result=""
+local IFS='-'
+local cut_done=0
+for part in $user_id; do
+if [[ $cut_done -eq 1 ]]; then
+break
+fi
+if [[ "$part" == "." ]]; then
+local suffix="${part##.}"
+if [[ ${#suffix} -ge 2 && ${#suffix} -le 4 ]]; then
+cut_done=1
+break
+fi
+fi
+if [[ -n "$result" ]]; then
+result="$result-$part"
+else
+result="$part"
+fi
+done
+user_id="$result"
+fi
+# Replace dots with dashes
+echo "${user_id//./-}"
+}
+# Get the per-user namespace for the current user
+get_user_namespace() {
+local user=$(get_effective_user_id)
+local sanitized=$(sanitize_user_id "$user")
+echo "user-${sanitized}"
+}
+# Resolve agent CR name — looks up UserAgent in user namespace, falls back to convention
+get_agent_cr_name() {
+local agent=$1
+local user_ns=$(get_user_namespace)
+local cr_name
+cr_name=$(kubectl get useragents -n "$user_ns" -o json 2>/dev/null | jq -r --arg an "$agent" '.items[] | select(.spec.agent_name == $an) | .metadata.name' 2>/dev/null | head -1)
+if [[ -z "$cr_name" ]]; then
+cr_name="${agent}-agent"
+fi
+echo "$cr_name"
+}
+# Resolve agent namespace from UserAgent CR status, falls back to derived name
+get_agent_namespace() {
+local agent=$1
+local user_ns=$(get_user_namespace)
+local sanitized_user
+sanitized_user=$(sanitize_user_id "$(get_effective_user_id)")
+local namespace
+namespace=$(kubectl get useragents -n "$user_ns" -o json 2>/dev/null | jq -r --arg an "$agent" '.items[] | select(.spec.agent_name == $an) | .status.namespace' 2>/dev/null | head -1)
+if [[ -n "$namespace" ]]; then
+echo "$namespace"
+return
+fi
+echo "agent-${sanitized_user}-${agent}"
+}
+check_namespace_exists() {
+local ns=$1
+# Try to list pods in the namespace as a proxy for namespace existence
+# (avoids needing cluster-level namespace get/list permission)
+kubectl get pods -n "$ns" --no-headers 2>/dev/null 1>/dev/null
+}
+# EKS cluster constants for kubeconfig setup
+PALANA_EKS_CLUSTER_NAME="palana-eks-remote"
+PALANA_KUBE_CONTEXT="palana-eks-remote"
+PALANA_EKS_REGION="ap-southeast-1"
+PALANA_EKS_ENDPOINT="https://8D80AB2BEFACFC0257E114FD066E957F.gr7.ap-southeast-1.eks.amazonaws.com"
+PALANA_EKS_CA_DATA="LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURCVENDQWUyZ0F3SUJBZ0lJZisvTHV0WDcwdW93RFFZSktvWklodmNOQVFFTEJRQXdGVEVUTUJFR0ExVUUKQXhNS2EzVmlaWEp1WlhSbGN6QWVGdzB5TmpBek1UY3dOVFUxTVRoYUZ3MHpOakF6TVRRd05qQXdNVGhhTUJVeApFekFSQmdOVkJBTVRDbXQxWW1WeWJtVjBaWE13Z2dFaU1BMEdDU3FHU0liM0RRRUJBUVVBQTRJQkR3QXdnZ0VLCkFvSUJBUUNmclovQmFJRS9GbExVMUpNdHZHVk1XQ1JwRWYvR1NYL3NCSVR1S3hHOGk0b04xVENLRkJRcFlIUW8KV2t6M1Fkamp4VzRGMlFpejQ0aXZydW9ZNE9CR2FzUXE2dFYyd3VjYkh5ekY1Vi9yMmlFbHVIVHRHUmRsdTNlbQpqK1gzekgrYm54NGhrQnoraVk5UytzRm00Ly8zZFpYZy90WjZzS3hlS01vU2NxSEVnQkZ4R1U2bmNwY2ZtV1FZCng0MDdnQ0t2cjFZTEIyaGQ4eWFJQzJUcXgwT24wVFhwdlAvbTA4clJINnhLbTR2R1ZVTlMxOWlqNWVXWEYzUjMKMEdMYW92NnVIWnpNUC9TTGtXTXZvSVh0clRDcVJRaDRrTWlHMDY5THdRZW9QS25wczkyK1RxSjlRbHBrZHVBYwpRT3pzYThxbFRHblZqKzBYdkZCSytrU1FpNDlqQWdNQkFBR2pXVEJYTUE0R0ExVWREd0VCL3dRRUF3SUNwREFQCkJnTlZIUk1CQWY4RUJUQURBUUgvTUIwR0ExVWREZ1FXQkJRaGVIbnFRR2ZvNmtOQzBRYitlYkhIWDluQXhEQVYKQmdOVkhSRUVEakFNZ2dwcmRXSmxjbTVsZEdWek1BMEdDU3FHU0liM0RRRUJDd1VBQTRJQkFRQm5RWjdqa2JRdworRHVRWjBITnVUMTA3Ym81bU04d3lPUmQ5YVZaMVlSQnpqaXZ5SUxSZW5sUS9jeSt5S3cxVnhmTXBXakNVbzljCjU2L0kzQ0xMU04rUHRqVFlpOTc4K1Zvd3B3VytkMlNHbVNwTTRMTmd0eFpEd0orcmlCNTM3alRBTk1sK0lqV2wKY0JsSnZiZndQekJoM29QWVVseHNFUE94WW9ManNQZ0FvKytoQUQxTU5uOXBUVTJiY3pENFZlVlNZdVpWWFhzTwpWTmJRV3Jzdm00cmNzYlUvME1OYnMzYXlOcWhFeC9sZllvbUQ4UndhYkE3NStSOFNkNmtZOTFIZWI0WGJxeDJ1Cnh4ejArMXdwQzM4ZlBXV0xYaXRTNGVxMXZjNVZwYlQ5NzV4RmhoT1RPSzJVSzAxa3JqSStKNUdqU3FKR0tsUUYKWjh6YS9VRnAwSmFoCi0tLS0tRU5EIENFUlRJRklDQVRFLS0tLS0K"
+configure_palana_kubeconfig() {
+echo_step "Configuring Palana remote cluster kubeconfig..."
+if kubectl config get-clusters 2>/dev/null | grep -q "^${PALANA_KUBE_CONTEXT}$"; then
+echo_pass "Cluster '${PALANA_KUBE_CONTEXT}' already in kubeconfig"
+else
+local ca_file
+ca_file=$(mktemp)
+echo "$PALANA_EKS_CA_DATA" | base64 -d > "$ca_file" 2>/dev/null || echo "$PALANA_EKS_CA_DATA" | base64 --decode > "$ca_file"
+kubectl config set-cluster "$PALANA_KUBE_CONTEXT" \
+--server="$PALANA_EKS_ENDPOINT" \
+--certificate-authority="$ca_file" \
+--embed-certs=true 1>/dev/null
+rm -f "$ca_file"
+echo_pass "Added cluster '${PALANA_KUBE_CONTEXT}' to kubeconfig"
+fi
+if kubectl config get-contexts -o name 2>/dev/null | grep -q "^${PALANA_KUBE_CONTEXT}$"; then
+echo_pass "Context '${PALANA_KUBE_CONTEXT}' already exists"
+else
+kubectl config set-context "$PALANA_KUBE_CONTEXT" \
+--cluster="$PALANA_KUBE_CONTEXT" 1>/dev/null
+echo_pass "Added context '${PALANA_KUBE_CONTEXT}' (run 'pcli login' to authenticate)"
+fi
+mkdir -p "$HOME/.palana"
+echo -n "$PALANA_KUBE_CONTEXT" > "$HOME/.palana/remote-context"
+kubectl config use-context "$PALANA_KUBE_CONTEXT" 1>/dev/null
+echo_pass "Active context: '${PALANA_KUBE_CONTEXT}'"
+}
+cmd_preflight() {
+if contains_help "$@"; then
+echo "Usage: pcli preflight"
+echo ""
+echo "Check required tools and configure kubeconfig for the remote Palana EKS cluster."
+echo "Run this once before using pcli for the first time."
+exit 0
+fi
+echo ""
+echo "═══════════════════════════════════════════════════════════════"
+echo " PALANA PREFLIGHT CHECK"
+echo "═══════════════════════════════════════════════════════════════"
+echo ""
+check_prerequisites
+configure_palana_kubeconfig
+# Set up ~/.palana/build/user-manifests with a default template
+local user_manifests="$HOME/.palana/build/user-manifests"
+mkdir -p "$user_manifests"
+if [[ ! -f "$user_manifests/default.yaml" ]]; then
+local src="$MANIFESTS_DIR/claudecodeui.yaml"
+if [[ -f "$src" ]]; then
+cp "$src" "$user_manifests/default.yaml"
+echo " Created default template: $user_manifests/default.yaml"
+echo " Edit this file to change the default agent template."
+fi
+fi
+# Sync system templates from agent-api
+echo ""
+echo_step "Syncing templates from agent-api..."
+cmd_sync 2>/dev/null || echo_warn "Template sync failed (will work offline with local manifests)"
+echo ""
+echo_pass "Preflight complete!"
+echo ""
+echo "Next steps:"
+echo " 1. Authenticate: pcli login"
+echo " 2. Create agent: pcli create demo"
+echo " 3. List agents: pcli list"
+}
+# Create agent
+cmd_create() {
+if contains_help "$@"; then
+echo "Usage: pcli create [cpu] [memory] [storage] [pods] [--debug]"
+echo ""
+echo "Options:"
+echo " --template NAME Agent template (default: 'default'). Run 'pcli templates' to list."
+echo " --ssh-mode MODE SSH access: off|sidecar|direct (default: off)"
+echo " Note: enabling SSH after creation will restart your agent."
+echo " --artifact-fs Enable the artifact-fs lazy-mount capability. The agent comes up"
+echo " with /data/code/ populated by the artifact-fs CSI driver if"
+echo " you also set 'gitlab_project_path' (group/repo) via"
+echo " 'pcli secrets agent set'. Launch-time only — cannot be flipped"
+echo " on an existing agent."
+echo " --debug Show full agent details (kubectl describe output)"
+exit 0
+fi
+check_credentials
+check_manifest_staleness
+local debug=0
+local template=""
+local ssh_mode="off"
+local artifact_fs="false"
+local filtered_args=()
+while [[ $# -gt 0 ]]; do
+case "$1" in
+--debug) debug=1; shift ;;
+--template) template="$2"; shift 2 ;;
+--ssh-mode) ssh_mode="$2"; shift 2 ;;
+--artifact-fs) artifact_fs="true"; shift ;;
+*) filtered_args+=("$1"); shift ;;
+esac
+done
+set -- "${filtered_args[@]}"
+local name=$1
+local explicit_cpu=${2:-}
+local explicit_memory=${3:-}
+local explicit_storage=${4:-}
+local explicit_pods=${5:-}
+if [[ -z "$name" ]]; then
+echo_fail "Usage: pcli create --template [cpu] [memory] [storage] [pods] [--debug]"
+exit 1
+fi
+validate_cpu_milli "$explicit_cpu" || exit 1
+validate_memory_mi "$explicit_memory" || exit 1
+# Resolve template: explicit flag > manifest matching agent name > default > error
+if [[ -z "$template" ]]; then
+if [[ -n "$(resolve_manifest "$name")" ]]; then
+template="$name"
+elif [[ -n "$(resolve_manifest "default")" ]]; then
+template="default"
+echo " No --template specified — using default template."
+echo " Run 'pcli templates' to see all options, or pass --template to override."
+else
+echo_fail "No template specified and no manifest matching '${name}' found."
+echo " Run 'pcli preflight' to set up a default template, or specify one:"
+for f in "$MANIFESTS_DIR"/.yaml "$USER_MANIFESTS_DIR"/.yaml "$HOME_USER_MANIFESTS_DIR"/.yaml "$HOME_MANIFESTS_DIR"/.yaml; do
+[[ -f "$f" ]] && echo " $(basename "$f" .yaml)"
+done
+echo ""
+echo " Usage: pcli create ${name} --template "
+exit 1
+fi
+elif [[ -z "$(resolve_manifest "$template")" ]]; then
+echo_fail "Unknown template '${template}'. Available:"
+for f in "$MANIFESTS_DIR"/.yaml "$USER_MANIFESTS_DIR"/.yaml "$HOME_USER_MANIFESTS_DIR"/.yaml "$HOME_MANIFESTS_DIR"/.yaml; do
+[[ -f "$f" ]] && echo " $(basename "$f" .yaml)"
+done
+exit 1
+fi
+# Read resource defaults from manifest (explicit args override)
+local cpu=${explicit_cpu:-1000}
+local memory=${explicit_memory:-2048}
+local storage=${explicit_storage:-5}
+local pods=${explicit_pods:-20}
+if [[ -n "$(resolve_manifest "$template")" ]]; then
+local m_cpu=$(manifest_field "$template" "resources.cpu")
+local m_memory=$(manifest_field "$template" "resources.memory")
+local m_storage=$(manifest_field "$template" "storage.size")
+[[ -z "$explicit_cpu" && -n "$m_cpu" ]] && cpu="${m_cpu%m}"
+[[ -z "$explicit_memory" && -n "$m_memory" ]] && memory="${m_memory%Mi}"
+[[ -z "$explicit_storage" && -n "$m_storage" ]] && storage="${m_storage%Gi}"
+fi
+local user=$(get_effective_user_id)
+echo_step "Creating agent: $(sanitize_user_id "$user")/$name (template: $template)"
+echo " CPU: ${cpu}m, Memory: ${memory}Mi, Storage: ${storage}GB, Pods: ${pods}"
+local req_body
+req_body=$(jq -n \
+--arg name "$name" \
+--arg template "$template" \
+--arg cpu "$cpu" \
+--arg memory "$memory" \
+--arg storage "$storage" \
+--arg ssh "$ssh_mode" \
+--argjson pods "$pods" \
+--argjson artifact_fs "$artifact_fs" \
+'{name:$name, template:$template, cpu_limit:$cpu, memory_limit:$memory, storage_size:$storage, pod_limit:$pods, ssh_mode:$ssh, artifact_fs_enabled:$artifact_fs}')
+if [[ "$artifact_fs" == "true" ]]; then
+echo " artifact-fs: enabled (set gitlab_project_path via 'pcli secrets agent set' to choose the repo)"
+fi
+local response status body
+response=$(api_call POST "/api/v1/agents" "$req_body")
+status=$(echo "$response" | tail -1)
+body=$(echo "$response" | sed '$d')
+if [[ "$status" == "409" ]]; then
+echo_warn "Agent already exists, continuing..."
+elif [[ "$status" != "200" && "$status" != "201" ]]; then
+local err
+err=$(echo "$body" | jq -r '.error // "unknown error"' 2>/dev/null || echo "$body")
+echo_fail "Create failed: $err (HTTP $status)"
+exit 1
+else
+echo_pass "Agent created"
+fi
+echo_step "Waiting for agent to be ready..."
+local deadline=$(( $(date +%s) + 120 ))
+local ready="false" phase="" agent_ns="" poll_body=""
+while [[ $(date +%s) -lt $deadline ]]; do
+sleep 2
+local poll_resp poll_status
+poll_resp=$(api_call GET "/api/v1/agents/$name")
+poll_status=$(echo "$poll_resp" | tail -1)
+poll_body=$(echo "$poll_resp" | sed '$d')
+[[ "$poll_status" != "200" ]] && continue
+ready=$(echo "$poll_body" | jq -r '.ready // false' 2>/dev/null)
+phase=$(echo "$poll_body" | jq -r '.phase // ""' 2>/dev/null)
+agent_ns=$(echo "$poll_body" | jq -r '.namespace // ""' 2>/dev/null)
+[[ "$ready" == "true" ]] && break
+[[ "$phase" == "Failed" ]] && break
+done
+if [[ "$ready" != "true" ]]; then
+echo ""
+echo_fail "Agent not ready within 120s: $user/$name (phase: ${phase:-unknown})"
+echo ""
+echo "Latest status — run 'pcli describe $name' for full details."
+exit 1
+fi
+echo ""
+echo_pass "Agent $user/$name is ready!"
+[[ -n "$agent_ns" ]] && echo " Namespace: $agent_ns"
+if [[ $debug -eq 1 ]]; then
+echo ""
+echo "Agent details:"
+local d_resp d_body
+d_resp=$(api_call GET "/api/v1/agents/${name}/describe")
+d_body=$(echo "$d_resp" | sed '$d')
+if command -v yq &>/dev/null; then
+echo "$d_body" | yq -P
+else
+echo "$d_body" | jq .
+fi
+fi
+}
+# List agents
+cmd_list() {
+if contains_help "$@"; then
+echo "Usage: pcli list [--all]"
+echo ""
+echo "List your agents. Use --all to list all agents (admin only)."
+exit 0
+fi
+check_credentials
+local show_all=0
+for arg in "$@"; do
+[[ "$arg" == "--all" ]] && show_all=1
+done
+local path="/api/v1/agents"
+[[ "$show_all" == "1" ]] && path="${path}?all=true"
+local response status body
+response=$(api_call GET "$path")
+status=$(echo "$response" | tail -1)
+body=$(echo "$response" | sed '$d')
+if [[ "$status" == "403" ]]; then
+echo_fail "Admin group membership required for --all"
+exit 1
+fi
+if [[ "$status" != "200" ]]; then
+local err
+err=$(echo "$body" | jq -r '.error // "unknown error"' 2>/dev/null || echo "$body")
+echo_fail "Failed to list agents: $err (HTTP $status)"
+exit 1
+fi
+echo ""
+echo "Agents (use AGENT name in pcli commands):"
+local count
+count=$(echo "$body" | jq 'length' 2>/dev/null || echo 0)
+if [[ "$count" == "0" ]]; then
+if [[ "$show_all" == "1" ]]; then
+echo " (No agents)"
+else
+echo " (No agents created yet — run 'pcli create ' to get started)"
+fi
+return
+fi
+echo "$body" | jq -r '.[] | "(.spec.agent_name)\t(.status.phase // "—")\t(.status.ready // "false")"' | while IFS=$'\t' read -r name phase ready; do
+echo " - ${name} (Phase: ${phase}, Ready: ${ready})"
+done
+}
+# Delete agent
+cmd_delete() {
+if contains_help "$@"; then
+echo "Usage: pcli delete "
+exit 0
+fi
+check_credentials
+local name=$1
+if [[ -z "$name" ]]; then
+echo_fail "Usage: pcli delete "
+exit 1
+fi
+local user=$(get_effective_user_id)
+echo_step "Deleting agent: $user/$name"
+local response status body
+response=$(api_call DELETE "/api/v1/agents/$name")
+status=$(echo "$response" | tail -1)
+body=$(echo "$response" | sed '$d')
+if [[ "$status" == "404" ]]; then
+echo_fail "Agent not found: $name"
+exit 1
+fi
+if [[ "$status" != "200" ]]; then
+local err
+err=$(echo "$body" | jq -r '.error // "unknown error"' 2>/dev/null || echo "$body")
+echo_fail "Delete failed: $err (HTTP $status)"
+exit 1
+fi
+echo_pass "Agent deleted: $user/$name"
+}
+# Run workload (equivalent to pcli run)
+cmd_run() {
+local name=$1
+local image=$2
+local port=8080
+if [[ -z "$name" || -z "$image" ]]; then
+echo_fail "Usage: pcli run [--port ]"
+exit 1
+fi
+shift 2
+while [[ $# -gt 0 ]]; do
+case "$1" in
+--port)
+port="$2"
+shift 2
+;;
+*)
+shift
+;;
+esac
+done
+check_credentials
+local user=$(get_effective_user_id)
+local sanitized_user=$(sanitize_user_id "$user")
+echo_step "Deploying image '$image' to agent $sanitized_user/$name on port $port..."
+local deploy_body
+deploy_body=$(jq -n \
+--arg img "$image" \
+--argjson port "$port" \
+'{image: $img, port: $port}')
+local response status body
+response=$(api_call POST "/api/v1/agents/${name}/deploy" "$deploy_body")
+status=$(echo "$response" | tail -1)
+body=$(echo "$response" | sed '$d')
+if [[ "$status" != "200" && "$status" != "201" ]]; then
+local err
+err=$(echo "$body" | jq -r '.error // "unknown error"' 2>/dev/null || echo "$body")
+echo_fail "Deployment failed: $err (HTTP $status)"
+exit 1
+fi
+echo_pass "Workload successfully deployed!"
+local endpoint
+endpoint=$(echo "$body" | jq -r '.endpoint // empty')
+if [[ -n "$endpoint" ]]; then
+echo " Live URL: https://${endpoint}"
+fi
+}
+# API Call wrapper
+api_call() {
+local method="$1"
+local path="$2"
+local data="${3:-}"
+local api_url
+api_url=$(get_agent_api_url)
+local token
+token=$(get_oauth_token)
+local headers=(-H "Authorization: Bearer ${token}")
+if [[ -n "$data" ]]; then
+headers+=(-H "Content-Type: application/json" -d "$data")
+fi
+local resp code
+resp=$(curl -s -w "\n%{http_code}" -X "$method" "${api_url}${path}" "${headers[@]}" 2>/dev/null)
+code=$(echo "$resp" | tail -1)
+resp=$(echo "$resp" | sed '$d')
+echo "$resp"
+echo "$code"
+}
+# Parse positional arguments
+cmd=$1
+shift || true
+case "$cmd" in
+preflight)
+cmd_preflight "$@"
+;;
+login)
+cmd_login "$@"
+;;
+create)
+cmd_create "$@"
+;;
+list)
+cmd_list "$@"
+;;
+delete)
+cmd_delete "$@"
+;;
+run)
+cmd_run "$@"
+;;
+*)
+cmd_help
+exit 1
+;;
+esac

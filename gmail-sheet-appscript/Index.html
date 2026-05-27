@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Dispute Case Tracker</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: "Google Sans", Roboto, Arial, sans-serif; background: #f8f9fa; color: #202124; min-height: 100vh; }
+    header { background: #1a73e8; color: white; padding: 16px 24px; display: flex; align-items: center; gap: 12px; box-shadow: 0 2px 4px rgba(0,0,0,0.2); }
+    header h1 { font-size: 20px; font-weight: 500; }
+    header .subtitle { font-size: 13px; opacity: 0.85; margin-top: 2px; }
+    .toolbar { padding: 16px 24px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; background: white; border-bottom: 1px solid #e0e0e0; }
+    .filter-btn { padding: 6px 16px; border-radius: 16px; border: 1px solid #dadce0; background: white; cursor: pointer; font-size: 13px; color: #5f6368; transition: all 0.15s; }
+    .filter-btn:hover { background: #f1f3f4; }
+    .filter-btn.active { background: #e8f0fe; border-color: #1a73e8; color: #1a73e8; font-weight: 500; }
+    .search-box { flex: 1; min-width: 200px; padding: 6px 12px; border: 1px solid #dadce0; border-radius: 16px; font-size: 13px; outline: none; transition: border-color 0.15s; }
+    .search-box:focus { border-color: #1a73e8; }
+    .search-box::placeholder { color: #9aa0a6; }
+    .sort-select { padding: 6px 12px; border: 1px solid #dadce0; border-radius: 16px; background: white; font-size: 13px; cursor: pointer; outline: none; }
+    .sort-select:hover { border-color: #1a73e8; }
+    .stats { padding: 12px 24px; display: flex; gap: 16px; flex-wrap: wrap; }
+    .stat-chip { background: white; border: 1px solid #e0e0e0; border-radius: 8px; padding: 8px 16px; font-size: 13px; }
+    .stat-chip strong { display: block; font-size: 20px; color: #1a73e8; }
+    .cases-container { padding: 0 24px 24px; }
+    .case-card { background: white; border-radius: 8px; border: 1px solid #e0e0e0; margin-bottom: 8px; overflow: hidden; transition: box-shadow 0.15s; }
+    .case-card:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+    .case-card.status-new { border-left: 4px solid #fbbc04; }
+    .case-card.status-inprogress { border-left: 4px solid #1a73e8; }
+    .case-card.status-completed { border-left: 4px solid #34a853; opacity: 0.75; }
+    .case-header { padding: 12px 16px; display: flex; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
+    .case-id { font-size: 11px; font-family: monospace; color: #5f6368; white-space: nowrap; }
+    .case-subject { flex: 1; font-weight: 500; font-size: 14px; min-width: 200px; }
+    .case-sender { font-size: 12px; color: #5f6368; flex-basis: 100%; padding-left: 0; }
+    .case-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+    .badge { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 11px; font-weight: 500; }
+    .queue-Dispute { background: #fce8e6; color: #c5221f; }
+    .queue-UpdateDetails { background: #e8f0fe; color: #1a73e8; }
+    .queue-Invoice { background: #e6f4ea; color: #137333; }
+    .queue-InternalInvoice { background: #fef7e0; color: #b06000; }
+    .queue-Others { background: #f1f3f4; color: #5f6368; }
+    .status-badge-New { background: #fef7e0; color: #b06000; }
+    .status-badge-InProgress { background: #e8f0fe; color: #1a73e8; }
+    .status-badge-Completed { background: #e6f4ea; color: #137333; }
+    .case-date { font-size: 11px; color: #9aa0a6; }
+    .case-actions { padding: 8px 16px 12px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .btn { padding: 6px 14px; border-radius: 4px; border: none; cursor: pointer; font-size: 13px; font-weight: 500; transition: all 0.15s; }
+    .btn-assign { background: #1a73e8; color: white; }
+    .btn-assign:hover { background: #1557b0; }
+    .btn-complete { background: #34a853; color: white; }
+    .btn-complete:hover { background: #2d8e47; }
+    .btn-email { background: white; color: #5f6368; border: 1px solid #dadce0; }
+    .btn-email:hover { background: #f1f3f4; }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .queue-select { padding: 5px 8px; border: 1px solid #dadce0; border-radius: 4px; font-size: 13px; color: #202124; background: white; cursor: pointer; }
+    .assigned-info { font-size: 11px; color: #5f6368; margin-left: auto; }
+    .loading { text-align: center; padding: 48px; color: #5f6368; font-size: 14px; }
+    .empty { text-align: center; padding: 48px; color: #9aa0a6; font-size: 14px; }
+    .refresh-btn { margin-left: auto; padding: 6px 14px; border-radius: 4px; border: 1px solid #dadce0; background: white; cursor: pointer; font-size: 13px; color: #1a73e8; font-weight: 500; }
+    .refresh-btn:hover { background: #e8f0fe; }
+    .toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: #323232; color: white; padding: 10px 20px; border-radius: 4px; font-size: 13px; opacity: 0; transition: opacity 0.3s; z-index: 999; pointer-events: none; }
+    .toast.show { opacity: 1; }
+    .pagination { padding: 16px 24px; background: white; border-top: 1px solid #e0e0e0; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; }
+    .page-info { font-size: 13px; color: #5f6368; }
+    .page-controls { display: flex; gap: 4px; align-items: center; }
+    .page-btn { min-width: 36px; padding: 6px 12px; border-radius: 4px; border: 1px solid #dadce0; background: white; cursor: pointer; font-size: 13px; color: #5f6368; transition: all 0.15s; }
+    .page-btn:hover:not(:disabled) { background: #f1f3f4; border-color: #1a73e8; color: #1a73e8; }
+    .page-btn.active { background: #1a73e8; border-color: #1a73e8; color: white; font-weight: 500; }
+    .page-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .page-ellipsis { padding: 0 8px; color: #9aa0a6; font-size: 13px; }
+    .page-size-selector { font-size: 13px; color: #5f6368; display: flex; align-items: center; gap: 6px; }
+    .page-size-selector select { padding: 4px 8px; border: 1px solid #dadce0; border-radius: 4px; font-size: 13px; cursor: pointer; }
+  </style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>Dispute Case Tracker</h1>
+    <div class="subtitle">account.receivable.vn@grabtaxi.com</div>
+  </div>
+</header>
+
+<div class="toolbar">
+  <button class="filter-btn active" data-filter="all">All</button>
+  <button class="filter-btn" data-filter="New">New</button>
+  <button class="filter-btn" data-filter="In Progress">In Progress</button>
+  <button class="filter-btn" data-filter="Completed">Completed</button>
+  <span style="width:1px;height:20px;background:#e0e0e0;margin:0 4px;"></span>
+  <button class="filter-btn" data-queue="Dispute">Dispute</button>
+  <button class="filter-btn" data-queue="Update Details">Update Details</button>
+  <button class="filter-btn" data-queue="Invoice">Invoice</button>
+  <button class="filter-btn" data-queue="Internal Invoice">Internal Invoice</button>
+  <button class="filter-btn" data-queue="Others">Others</button>
+  <button class="refresh-btn" id="refreshBtn">Refresh</button>
+</div>
+
+<div class="toolbar" style="border-top: none; padding-top: 0;">
+  <input type="text" id="searchBox" class="search-box" placeholder="🔍 Search by Case ID, Sender, or Subject..." value="" />
+  <select id="sortSelect" class="sort-select">
+    <option value="newest">📅 Newest First</option>
+    <option value="oldest">📅 Oldest First</option>
+    <option value="status">📋 By Status</option>
+    <option value="queue">🏷️ By Queue</option>
+  </select>
+</div>
+
+<div class="stats" id="stats"></div>
+
+<div class="cases-container">
+  <div class="loading" id="loadingMsg">Loading cases...</div>
+  <div id="casesList"></div>
+</div>
+
+<div class="pagination" id="pagination" style="display:none;"></div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+  // ===== State variables =====
+  var allCases = [];
+  var activeStatusFilter = "all";
+  var activeQueueFilter = null;
+  var searchQuery = "";
+  var sortMode = "newest";
+
+  // Pagination state
+  var currentPage = 1;
+  var pageSize = 30;
+
+  // Constants
+  var QUEUES = ["Dispute", "Update Details", "Invoice", "Internal Invoice", "Others"];
+
+  // ===== Helper functions =====
+  function queueClass(q) {
+    return "queue-" + String(q || "Others").replace(/\s+/g, "");
+  }
+
+  function statusClass(s) {
+    return "status-badge-" + String(s || "New").replace(/\s+/g, "");
+  }
+
+  function cardClass(s) {
+    return "status-" + String(s || "New").toLowerCase().replace(/\s+/g, "");
+  }
+
+  function showToast(msg) {
+    var t = document.getElementById("toast");
+    t.textContent = msg;
+    t.classList.add("show");
+    setTimeout(function() {
+      t.classList.remove("show");
+    }, 2500);
+  }
+
+  function escHtml(str) {
+    return String(str == null ? "" : str)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  function renderStats(cases) {
+    var total = cases.length;
+    var newCount = cases.filter(function(c) { return c["Status"] === "New"; }).length;
+    var inProgress = cases.filter(function(c) { return c["Status"] === "In Progress"; }).length;
+    var completed = cases.filter(function(c) { return c["Status"] === "Completed"; }).length;
+    document.getElementById("stats").innerHTML =
+      '<div class="stat-chip"><strong>' + total + '</strong>Total</div>' +
+      '<div class="stat-chip"><strong>' + newCount + '</strong>New</div>' +
+      '<div class="stat-chip"><strong>' + inProgress + '</strong>In Progress</div>' +
+      '<div class="stat-chip"><strong>' + completed + '</strong>Completed</div>';
+  }
+
+    function renderCases(cases) {
+    var filtered = cases;
+
+    // === Apply status filter ===
+    if (activeStatusFilter !== "all") {
+      filtered = filtered.filter(function(c) {
+        return c["Status"] === activeStatusFilter;
+      });
+    }
+
+    // === Apply queue filter ===
+    if (activeQueueFilter) {
+      filtered = filtered.filter(function(c) {
+        return c["Queue"] === activeQueueFilter;
+      });
+    }
+
+    // === Apply search filter ===
+    if (searchQuery && searchQuery.trim() !== "") {
+      var q = searchQuery.toLowerCase().trim();
+      filtered = filtered.filter(function(c) {
+        return (
+          String(c["Case ID"] || "").toLowerCase().indexOf(q) !== -1 ||
+          String(c["Sender"] || "").toLowerCase().indexOf(q) !== -1 ||
+          String(c["Subject"] || "").toLowerCase().indexOf(q) !== -1 ||
+          String(c["Assigned To"] || "").toLowerCase().indexOf(q) !== -1
+        );
+      });
+    }
+
+    // === Apply sort ===
+    filtered = filtered.slice(); // copy to avoid mutating
+
+    if (sortMode === "newest") {
+      // Case ID format: CASE-YYYYMMDD-XXXXX, so descending sort = newest first
+      filtered.sort(function(a, b) {
+        return String(b["Case ID"]).localeCompare(String(a["Case ID"]));
+      });
+    } else if (sortMode === "oldest") {
+      filtered.sort(function(a, b) {
+        return String(a["Case ID"]).localeCompare(String(b["Case ID"]));
+      });
+    } else if (sortMode === "status") {
+      var statusOrder = { "New": 0, "In Progress": 1, "Completed": 2 };
+      filtered.sort(function(a, b) {
+        var sa = statusOrder[a["Status"]] !== undefined ? statusOrder[a["Status"]] : 3;
+        var sb = statusOrder[b["Status"]] !== undefined ? statusOrder[b["Status"]] : 3;
+        if (sa !== sb) return sa - sb;
+        return String(b["Case ID"]).localeCompare(String(a["Case ID"]));
+      });
+    } else if (sortMode === "queue") {
+      filtered.sort(function(a, b) {
+        var qa = String(a["Queue"] || "");
+        var qb = String(b["Queue"] || "");
+        if (qa !== qb) return qa.localeCompare(qb);
+        return String(b["Case ID"]).localeCompare(String(a["Case ID"]));
+      });
+    }
+
+    var container = document.getElementById("casesList");
+    var pagination = document.getElementById("pagination");
+
+    if (filtered.length === 0) {
+      container.innerHTML = '<div class="empty">No cases found.</div>';
+      pagination.style.display = "none";
+      return;
+    }
+
+    // === Pagination math ===
+    var totalPages = Math.ceil(filtered.length / pageSize);
+    if (currentPage > totalPages) currentPage = totalPages;
+    if (currentPage < 1) currentPage = 1;
+
+    var startIdx = (currentPage - 1) * pageSize;
+    var endIdx = Math.min(startIdx + pageSize, filtered.length);
+    var pageCases = filtered.slice(startIdx, endIdx);
+
+    // === Render current page's cases ===
+    var html = pageCases.map(function(c) {
+      var status = c["Status"] || "New";
+      var isCompleted = status === "Completed";
+      var isNew = status === "New";
+
+      var queueOpts = QUEUES.map(function(q) {
+        return '<option value="' + q + '"' + (c["Queue"] === q ? " selected" : "") + '>' + q + '</option>';
+      }).join("");
+
+      var caseIdEsc = escHtml(c["Case ID"]).replace(/'/g, "\\'");
+
+      var assignBtn = "";
+      if (!isCompleted && isNew) {
+        assignBtn = '<button class="btn btn-assign" onclick="assign(\'' + caseIdEsc + '\')">Assign to Me</button>';
+      }
+
+      var completeBtn = "";
+      if (!isCompleted && !isNew) {
+        completeBtn = '<button class="btn btn-complete" onclick="completeIt(\'' + caseIdEsc + '\')">Complete</button>';
+      }
+
+      var assignedInfo = "";
+      if (c["Assigned To"]) {
+        assignedInfo = '<span class="assigned-info">Assigned: ' + escHtml(c["Assigned To"]) + ' at ' + escHtml(c["Assigned At"]) + '</span>';
+      }
+
+      var completedInfo = "";
+      if (isCompleted) {
+        completedInfo = '<span class="assigned-info">Completed at ' + escHtml(c["Completed At"]) + '</span>';
+      }
+
+      return (
+        '<div class="case-card ' + cardClass(status) + '">' +
+          '<div class="case-header">' +
+            '<div>' +
+              '<div class="case-id">' + escHtml(c["Case ID"]) + '</div>' +
+              '<div class="case-subject">' + escHtml(c["Subject"]) + '</div>' +
+              '<div class="case-sender">' + escHtml(c["Sender"]) + '</div>' +
+              '<div class="case-meta">' +
+                '<span class="badge ' + queueClass(c["Queue"]) + '">' + escHtml(c["Queue"]) + '</span>' +
+                '<span class="badge ' + statusClass(status) + '">' + escHtml(status) + '</span>' +
+                '<span class="case-date">' + escHtml(c["Date Received"]) + '</span>' +
+              '</div>' +
+            '</div>' +
+          '</div>' +
+          '<div class="case-actions">' +
+            '<select class="queue-select" onchange="changeQueue(\'' + caseIdEsc + '\', this.value)">' + queueOpts + '</select>' +
+            assignBtn +
+            completeBtn +
+            '<a href="' + escHtml(c["Email Link"]) + '" target="_blank"><button class="btn btn-email">View Email</button></a>' +
+            assignedInfo +
+            completedInfo +
+          '</div>' +
+        '</div>'
+      );
+    }).join("");
+
+    container.innerHTML = html;
+
+    // Render pagination controls
+    renderPagination(filtered.length, totalPages);
+    pagination.style.display = "flex";
+  }
+
+    function renderPagination(totalCases, totalPages) {
+    var pagination = document.getElementById("pagination");
+
+    var startCase = (currentPage - 1) * pageSize + 1;
+    var endCase = Math.min(currentPage * pageSize, totalCases);
+
+    var infoHtml = '<div class="page-info">Showing ' + startCase + '-' + endCase + ' of ' + totalCases + ' cases</div>';
+
+    var sizeHtml = '<div class="page-size-selector">Per page: ' +
+      '<select onchange="changePageSize(this.value)">' +
+        '<option value="10"' + (pageSize === 10 ? " selected" : "") + '>10</option>' +
+        '<option value="30"' + (pageSize === 30 ? " selected" : "") + '>30</option>' +
+        '<option value="50"' + (pageSize === 50 ? " selected" : "") + '>50</option>' +
+        '<option value="100"' + (pageSize === 100 ? " selected" : "") + '>100</option>' +
+      '</select></div>';
+
+    var controlsHtml = '<div class="page-controls">';
+
+    if (totalPages > 1) {
+      controlsHtml += '<button class="page-btn"' + (currentPage === 1 ? ' disabled' : '') +
+        ' onclick="goToPage(' + (currentPage - 1) + ')">‹ Prev</button>';
+
+      var pages = [];
+      pages.push(1);
+      for (var p = currentPage - 2; p <= currentPage + 2; p++) {
+        if (p > 1 && p < totalPages) pages.push(p);
+      }
+      if (totalPages > 1) pages.push(totalPages);
+
+      pages = pages.filter(function(v, i, a) { return a.indexOf(v) === i; })
+                   .sort(function(a, b) { return a - b; });
+
+      var prev = 0;
+      pages.forEach(function(p) {
+        if (p - prev > 1) {
+          controlsHtml += '<span class="page-ellipsis">…</span>';
+        }
+        controlsHtml += '<button class="page-btn' + (p === currentPage ? ' active' : '') +
+          '" onclick="goToPage(' + p + ')">' + p + '</button>';
+        prev = p;
+      });
+
+      controlsHtml += '<button class="page-btn"' + (currentPage === totalPages ? ' disabled' : '') +
+        ' onclick="goToPage(' + (currentPage + 1) + ')">Next ›</button>';
+    }
+
+    controlsHtml += '</div>';
+
+    pagination.innerHTML =
+      '<div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap;">' + infoHtml + sizeHtml + '</div>' +
+      controlsHtml;
+  }
+
+  function goToPage(page) {
+    currentPage = page;
+    renderCases(allCases);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function changePageSize(newSize) {
+    pageSize = parseInt(newSize, 10);
+    currentPage = 1;
+    renderCases(allCases);
+  }
+
+  function loadCases() {
+    document.getElementById("loadingMsg").style.display = "block";
+    document.getElementById("casesList").innerHTML = "";
+
+    google.script.run
+      .withSuccessHandler(function(data) {
+        console.log("Got cases:", data ? data.length : "null");
+        if (!data || !Array.isArray(data)) {
+          document.getElementById("loadingMsg").textContent = "No cases returned (data is " + typeof data + ").";
+          return;
+        }
+        allCases = data.slice();
+        document.getElementById("loadingMsg").style.display = "none";
+        renderStats(allCases);
+        renderCases(allCases);
+      })
+      .withFailureHandler(function(err) {
+        console.error("getCases failed:", err);
+        document.getElementById("loadingMsg").textContent = "Error: " + (err && err.message ? err.message : JSON.stringify(err));
+      })
+      .getCases();
+  }
+
+  function assign(caseId) {
+    var caseObj = allCases.find(function(c) { return c["Case ID"] === caseId; });
+    if (!caseObj) return;
+
+    var oldStatus = caseObj["Status"];
+    var oldAssignedTo = caseObj["Assigned To"];
+    var oldAssignedAt = caseObj["Assigned At"];
+
+    caseObj["Status"] = "In Progress";
+    caseObj["Assigned To"] = "you";
+    caseObj["Assigned At"] = new Date().toLocaleString();
+
+    renderStats(allCases);
+    renderCases(allCases);
+    showToast("Assigning...");
+
+    google.script.run
+      .withSuccessHandler(function(result) {
+        if (result && result.user) {
+          caseObj["Assigned To"] = result.user;
+          caseObj["Assigned At"] = result.timestamp;
+          renderCases(allCases);
+        }
+        showToast("✅ Case assigned");
+      })
+      .withFailureHandler(function(err) {
+        caseObj["Status"] = oldStatus;
+        caseObj["Assigned To"] = oldAssignedTo;
+        caseObj["Assigned At"] = oldAssignedAt;
+        renderStats(allCases);
+        renderCases(allCases);
+        showToast("❌ Error: " + (err && err.message ? err.message : err));
+      })
+      .assignCase(caseId);
+  }
+
+  function completeIt(caseId) {
+    var caseObj = allCases.find(function(c) { return c["Case ID"] === caseId; });
+    if (!caseObj) return;
+
+    var oldStatus = caseObj["Status"];
+    var oldCompletedAt = caseObj["Completed At"];
+
+    caseObj["Status"] = "Completed";
+    caseObj["Completed At"] = new Date().toLocaleString();
+
+    renderStats(allCases);
+    renderCases(allCases);
+    showToast("Completing...");
+
+    google.script.run
+      .withSuccessHandler(function(result) {
+        if (result && result.timestamp) {
+          caseObj["Completed At"] = result.timestamp;
+          renderCases(allCases);
+        }
+        showToast("✅ Case completed");
+      })
+      .withFailureHandler(function(err) {
+        caseObj["Status"] = oldStatus;
+        caseObj["Completed At"] = oldCompletedAt;
+        renderStats(allCases);
+        renderCases(allCases);
+        showToast("❌ Error: " + (err && err.message ? err.message : err));
+      })
+      .completeCase(caseId);
+  }
+
+  function changeQueue(caseId, queue) {
+    var caseObj = allCases.find(function(c) { return c["Case ID"] === caseId; });
+    if (!caseObj) return;
+
+    var oldQueue = caseObj["Queue"];
+    caseObj["Queue"] = queue;
+
+    renderStats(allCases);
+    renderCases(allCases);
+    showToast("Updating...");
+
+    google.script.run
+      .withSuccessHandler(function() {
+        showToast("✅ Queue updated to: " + queue);
+      })
+      .withFailureHandler(function(err) {
+        caseObj["Queue"] = oldQueue;
+        renderStats(allCases);
+        renderCases(allCases);
+        showToast("❌ Error: " + (err && err.message ? err.message : err));
+      })
+      .updateQueue(caseId, queue);
+  }
+
+    // ===== Event Listeners =====
+
+  // Status filter buttons
+  var statusBtns = document.querySelectorAll(".filter-btn[data-filter]");
+  for (var i = 0; i < statusBtns.length; i++) {
+    statusBtns[i].addEventListener("click", function() {
+      var btns = document.querySelectorAll(".filter-btn[data-filter]");
+      for (var j = 0; j < btns.length; j++) {
+        btns[j].classList.remove("active");
+      }
+      this.classList.add("active");
+      activeStatusFilter = this.dataset.filter;
+      currentPage = 1;
+      renderCases(allCases);
+    });
+  }
+
+  // Queue filter buttons
+  var queueBtns = document.querySelectorAll(".filter-btn[data-queue]");
+  for (var k = 0; k < queueBtns.length; k++) {
+    queueBtns[k].addEventListener("click", function() {
+      if (this.classList.contains("active")) {
+        this.classList.remove("active");
+        activeQueueFilter = null;
+      } else {
+        var btns = document.querySelectorAll(".filter-btn[data-queue]");
+        for (var m = 0; m < btns.length; m++) {
+          btns[m].classList.remove("active");
+        }
+        this.classList.add("active");
+        activeQueueFilter = this.dataset.queue;
+      }
+      currentPage = 1;
+      renderCases(allCases);
+    });
+  }
+
+  // Refresh button
+  document.getElementById("refreshBtn").addEventListener("click", loadCases);
+
+  // Search box (with debounce so it doesn't re-render on every keystroke)
+  var searchTimeout = null;
+  document.getElementById("searchBox").addEventListener("input", function(e) {
+    clearTimeout(searchTimeout);
+    var value = e.target.value;
+    searchTimeout = setTimeout(function() {
+      searchQuery = value;
+      currentPage = 1;
+      renderCases(allCases);
+    }, 200);
+  });
+
+  // Sort dropdown
+  document.getElementById("sortSelect").addEventListener("change", function(e) {
+    sortMode = e.target.value;
+    currentPage = 1;
+    renderCases(allCases);
+  });
+
+  // Reset search box on load (in case browser auto-filled it)
+  document.getElementById("searchBox").value = "";
+  searchQuery = "";
+
+  // Initial load
+  loadCases();
+</script>
+</body>
+</html>
