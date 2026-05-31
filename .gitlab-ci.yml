@@ -31,7 +31,7 @@ deploy_agent:
     - curl -sSL -o pcli https://portal.agent.palana.engtools.net/portal/pcli && chmod +x pcli
     - ./pcli preflight
   script:
-    - ./pcli create ${AGENT_NAME} || true
+    - ./pcli create ${AGENT_NAME} 250 256 || true
     - ./pcli run ${AGENT_NAME} --port 8080 --run-as-user 1000 --fs-group 1000 --replace
   only:
     - master
