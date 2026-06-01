@@ -2,9 +2,6 @@ stages:
   - build
   - deploy
 
-default:
-  tags:
-    - palana_deploy
 
 variables:
   AGENT_NAME: "gmail-classifier"
