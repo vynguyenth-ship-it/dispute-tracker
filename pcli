@@ -1,5 +1,5 @@
-﻿#!/bin/bash
-export PATH="$PATH:."
+#!/bin/bash
+export PATH="$PATH:.:$HOME/awscli/Amazon/AWSCLIV2"
 # pcli - Standalone Palana CLI for remote cluster agent management
 # Standalone after 'pcli sync' — fetches templates from agent-api
 set -e
@@ -255,46 +255,52 @@ PKCE_CHALLENGE=$(printf '%s' "$PKCE_VERIFIER" | openssl dgst -sha256 -binary | o
 # Start a temporary HTTP server to receive the OIDC callback, extract code and state
 oidc_callback_server() {
 local port="$1" timeout_secs="${2:-120}"
-python3 -c "
-import http.server, urllib.parse, sys, threading
+python3 - <<PYEOF
+import http.server, urllib.parse, sys, threading, socket, socketserver
+
 class H(http.server.BaseHTTPRequestHandler):
-def do_GET(self):
-p = urllib.parse.urlparse(self.path)
-if p.path != '/callback':
-self.send_error(404)
-return
-qs = urllib.parse.parse_qs(p.query)
-if 'error' in qs:
-self.send_response(400)
-self.send_header('Content-Type','text/html')
-self.end_headers()
-self.wfile.write(b'
-Authorization failed
-Check the terminal.
-')
-print('ERROR:' + qs['error'][0] + ':' + qs.get('error_description',[''])[0])
-return
-code = qs.get('code',[''])[0]
-state = qs.get('state',[''])[0]
-self.send_response(200)
-self.send_header('Content-Type','text/html')
-self.end_headers()
-self.wfile.write(b'
-Authorization successful
-You can close this tab.
-')
-print('CODE:' + code)
-print('STATE:' + state)
-def log_message(self, *a): pass
+    def do_GET(self):
+        p = urllib.parse.urlparse(self.path)
+        if p.path != '/callback':
+            self.send_error(404)
+            return
+        qs = urllib.parse.parse_qs(p.query)
+        if 'error' in qs:
+            self.send_response(400)
+            self.send_header('Content-Type', 'text/html')
+            self.end_headers()
+            self.wfile.write(b'<html><body>Authorization failed. Check the terminal.</body></html>')
+            print('ERROR:' + qs['error'][0] + ':' + qs.get('error_description', [''])[0])
+            return
+        code = qs.get('code', [''])[0]
+        state = qs.get('state', [''])[0]
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/html')
+        self.end_headers()
+        self.wfile.write(b'<html><body>Authorization successful. You can close this tab.</body></html>')
+        print('CODE:' + code)
+        print('STATE:' + state)
+    def log_message(self, *a): pass
 
+class DualStack(socketserver.TCPServer):
+    address_family = socket.AF_INET6
+    def server_bind(self):
+        self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        super().server_bind()
 
-s = http.server.HTTPServer(('127.0.0.1', $port), H)
-t = threading.Timer($timeout_secs, s.shutdown)
+try:
+    s = DualStack(('::', ${port}), H)
+    print('Listening on :: (IPv4+IPv6) port ${port}', file=sys.stderr)
+except OSError:
+    s = http.server.HTTPServer(('0.0.0.0', ${port}), H)
+    print('Listening on 0.0.0.0 (IPv4) port ${port}', file=sys.stderr)
+
+t = threading.Timer(${timeout_secs}, s.shutdown)
 t.daemon = True
 t.start()
 s.handle_request()
 t.cancel()
-" 2>/dev/null
+PYEOF
 }
 # Decode JWT payload and extract a field
 jwt_get_field() {
@@ -1037,6 +1043,200 @@ if [[ -n "$endpoint" ]]; then
 echo " Live URL: https://${endpoint}"
 fi
 }
+render_rebuild_template_json() {
+  python3 - "$1" "$2" <<'PYEOF'
+import sys, json
+try:
+    import yaml
+except ImportError:
+    print("ERROR: PyYAML not available (pip install pyyaml)", file=sys.stderr)
+    sys.exit(1)
+with open(sys.argv[1]) as f:
+    data = yaml.safe_load(f)
+data.pop("apiVersion", None)
+data.pop("kind", None)
+data.setdefault("container", {})["image"] = sys.argv[2] + ":latest"
+print(json.dumps(data))
+PYEOF
+}
+create_ecr_docker_config() {
+local registry="$1" region="$2" access_key="$3" secret_key="$4" session_token="$5"
+local tmpdir
+tmpdir=$(mktemp -d)
+local auth_token
+auth_token=$(AWS_ACCESS_KEY_ID="$access_key" AWS_SECRET_ACCESS_KEY="$secret_key" AWS_SESSION_TOKEN="$session_token" \
+  aws ecr get-login-password --region "$region" 2>/dev/null)
+if [[ -z "$auth_token" ]]; then
+  rm -rf "$tmpdir"
+  return 1
+fi
+local encoded
+encoded=$(printf "AWS:%s" "$auth_token" | base64 | tr -d '\n')
+cat > "$tmpdir/config.json" <<EOF
+{"auths":{"${registry}":{"auth":"${encoded}"}}}
+EOF
+echo "$tmpdir"
+}
+# Rebuild and push docker image
+cmd_rebuild() {
+  if contains_help "$@"; then
+    echo "Usage: pcli rebuild <image-name> [--no-cache] [--template <file>] [docker-build-args...]"
+    echo ""
+    echo "  image-name          Image name (e.g. opencode, litellm)"
+    echo "  --no-cache          Build without using Docker cache"
+    echo "  --template <file>   Register/update user template from manifest YAML after build"
+    echo "  docker-build-args   Additional docker buildx arguments"
+    echo ""
+    echo "Examples:"
+    echo "  pcli rebuild opencode -t testing -f build/Dockerfile.opencode ."
+    echo "  pcli rebuild opencode --no-cache"
+    echo "  pcli rebuild litellm -f build/Dockerfile.litellm . --build-arg VERSION=2.0"
+    echo "  pcli rebuild holyclaude --template build/user-manifests/holyclaude.yaml"
+    exit 0
+  fi
+
+  local image_name=$1
+  shift || true
+
+  local no_cache="" template_file=""
+  local -a docker_args=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --no-cache) no_cache="--no-cache"; shift ;;
+      --template) template_file="$2"; shift 2 ;;
+      *) docker_args+=("$1"); shift ;;
+    esac
+  done
+  set -- "${docker_args[@]+"${docker_args[@]}"}"
+
+  if [[ -z "$image_name" ]]; then
+    echo_fail "Missing image name"
+    echo "Usage: pcli rebuild <image-name> [docker-build-args...]"
+    exit 1
+  fi
+
+  if [[ -n "$template_file" && ! -f "$template_file" ]]; then
+    echo_fail "Template file not found: $template_file"
+    exit 1
+  fi
+
+  if ! command -v docker &>/dev/null; then
+    echo_fail "docker command not found. Install Docker to use 'pcli rebuild'."
+    echo "Alternatively, use 'glab ci run -b main --variables build_agent:<image-name>' to build through CI/CD."
+    exit 1
+  fi
+
+  if ! command -v aws &>/dev/null; then
+    echo_fail "aws command not found. Install AWS CLI v2 to use 'pcli rebuild'."
+    echo "Alternatively, use 'glab ci run -b main --variables build_agent:<image-name>' to build through CI/CD."
+    exit 1
+  fi
+
+  check_credentials
+
+  echo_step "Requesting ECR credentials for: $image_name"
+  local response
+  response=$(api_call POST "/api/v1/ecr/credentials" "{\"image_name\": \"$image_name\"}")
+  local cred_status cred_body
+  cred_status=$(echo "$response" | tail -1)
+  cred_body=$(echo "$response" | sed '$d')
+
+  if [[ "$cred_status" != "200" ]]; then
+    local err
+    err=$(echo "$cred_body" | jq -r '.error // "unknown error"' 2>/dev/null || echo "$cred_body")
+    echo_fail "Failed to get ECR credentials: $err (HTTP $cred_status)"
+    exit 1
+  fi
+
+  local ecr_registry ecr_repository access_key secret_key session_token region
+  ecr_registry=$(echo "$cred_body" | jq -r '.registry')
+  ecr_repository=$(echo "$cred_body" | jq -r '.repository')
+  access_key=$(echo "$cred_body" | jq -r '.access_key_id')
+  secret_key=$(echo "$cred_body" | jq -r '.secret_access_key')
+  session_token=$(echo "$cred_body" | jq -r '.session_token')
+  region=$(echo "$cred_body" | jq -r '.region')
+
+  local ecr_full_repo="${ecr_registry}/${ecr_repository}"
+  echo_pass "ECR credentials received (15-min TTL)"
+  echo "  Registry:   $ecr_registry"
+  echo "  Repository: $ecr_repository"
+
+  echo_step "Preparing isolated Docker credentials for ECR..."
+  local docker_config_dir
+  if ! docker_config_dir=$(create_ecr_docker_config "$ecr_registry" "$region" "$access_key" "$secret_key" "$session_token"); then
+    echo_fail "Failed to prepare Docker credentials for ECR"
+    exit 1
+  fi
+  trap 'rm -rf "$docker_config_dir"; trap - RETURN' RETURN
+  echo_pass "Docker credentials ready"
+
+  echo_step "Rebuilding image: $image_name"
+
+  local has_tag=0
+  for arg in "$@"; do
+    if [[ "$arg" == "-t" ]]; then
+      has_tag=1
+      break
+    fi
+  done
+
+  local has_context=0
+  local last_arg="${!#}"
+  if [[ $# -gt 0 && "$last_arg" != -* ]]; then
+    has_context=1
+  fi
+
+  if [[ $# -eq 0 ]]; then
+    set -- "-t" "${ecr_full_repo}:latest" "-f" "build/Dockerfile.${image_name}" "--push" "."
+  elif [[ $has_tag -eq 0 && $has_context -eq 0 ]]; then
+    set -- "$@" "-t" "${ecr_full_repo}:latest" "--push" "."
+  elif [[ $has_tag -eq 0 ]]; then
+    set -- "$@" "-t" "${ecr_full_repo}:latest" "--push"
+  elif [[ $has_context -eq 0 ]]; then
+    set -- "$@" "--push" "."
+  else
+    set -- "$@" "--push"
+  fi
+
+  echo_step "Building and pushing multi-arch (amd64+arm64) to ECR with: docker buildx build ${no_cache} --platform linux/amd64,linux/arm64 $*"
+  if ! DOCKER_CONFIG="$docker_config_dir" docker buildx build ${no_cache} --platform linux/amd64,linux/arm64 "$@"; then
+    rm -rf "$docker_config_dir"
+    trap - RETURN
+    echo_fail "Failed to build and push image"
+    exit 1
+  fi
+  rm -rf "$docker_config_dir"
+  trap - RETURN
+
+  echo_pass "Image built and pushed successfully (amd64+arm64)"
+  echo ""
+  echo "  Deploy with:  pcli run <agent> user/${image_name}"
+
+  if [[ -z "$template_file" ]]; then
+    return
+  fi
+
+  echo_step "Registering template from: $template_file"
+  local manifest_json
+  if ! manifest_json=$(render_rebuild_template_json "$template_file" "$ecr_full_repo"); then
+    echo_fail "Failed to parse template file: $template_file"
+    exit 1
+  fi
+
+  local tmpl_response tmpl_status tmpl_body
+  tmpl_response=$(api_call POST "/api/v1/user-templates" "$manifest_json")
+  tmpl_status=$(echo "$tmpl_response" | tail -1)
+  tmpl_body=$(echo "$tmpl_response" | sed '$d')
+
+  if [[ "$tmpl_status" == "201" ]]; then
+    echo_pass "Template registered: $image_name"
+  else
+    local err
+    err=$(echo "$tmpl_body" | jq -r '.error // "unknown error"' 2>/dev/null || echo "$tmpl_body")
+    echo_fail "Failed to register template: $err (HTTP $tmpl_status)"
+    exit 1
+  fi
+}
 # API Call wrapper
 api_call() {
 local method="$1"
@@ -1078,6 +1278,9 @@ cmd_delete "$@"
 ;;
 run)
 cmd_run "$@"
+;;
+rebuild)
+cmd_rebuild "$@"
 ;;
 *)
 cmd_help
