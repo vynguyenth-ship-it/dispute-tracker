@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
         - name: gmail-classifier
-          image: 011014824127.dkr.ecr.ap-southeast-1.amazonaws.com/gmail-classifier:v1
+          image: 448623754506.dkr.ecr.ap-southeast-1.amazonaws.com/user/vy-nguyenth/gmail-classifier:latest
           ports:
             - containerPort: 8080
           resources:
