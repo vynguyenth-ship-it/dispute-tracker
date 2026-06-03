@@ -12,10 +12,10 @@ build_image:
     - name: docker-registry.gitlab.myteksi.net/library/docker:dind
       alias: docker
   before_script:
-    - apk add --no-cache curl bash aws-cli jq python3 openssl kubectl
+    - apk add --no-cache bash aws-cli jq python3 openssl kubectl
     - mkdir -p ~/.palana
     - echo "${PALANA_KUBECONFIG}" | base64 -d > ~/.palana/kubeconfig
-    - curl -sSL -o pcli https://portal.agent.palana.engtools.net/portal/pcli && chmod +x pcli
+    - chmod +x pcli
     - ./pcli preflight
   script:
     - ./pcli rebuild ${AGENT_NAME} -f Dockerfile . --template build/user-manifests/gmail-classifier.yaml
