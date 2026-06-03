@@ -1,0 +1,25 @@
+apiVersion: palana.engtools.net/v1
+kind: UserAgent
+
+metadata:
+  name: gmail-classifier
+  description: "Gmail Classifier — Streamlit dispute tracker UI"
+
+resources:
+  cpu: 250m
+  memory: 256Mi
+
+storage:
+  size: 5Gi
+
+container:
+  image: placeholder   # overwritten by pcli rebuild via render_rebuild_template_json
+  web_port: 8080
+  env:
+    - name: PYTHONUNBUFFERED
+      value: "1"
+  secret_mounts:
+    - secret_name: google-credentials
+      mount_path: /app/service_account.json
+      sub_path: service_account.json
+      read_only: true

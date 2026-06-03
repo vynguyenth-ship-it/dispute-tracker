@@ -1,6 +1,5 @@
 stages:
   - build
-  - deploy
 
 variables:
   AGENT_NAME: "gmail-classifier"
@@ -17,19 +16,6 @@ build_image:
     - curl -sSL -o pcli https://portal.agent.palana.engtools.net/portal/pcli && chmod +x pcli
     - ./pcli preflight
   script:
-    - ./pcli rebuild ${AGENT_NAME} -f Dockerfile .
+    - ./pcli rebuild ${AGENT_NAME} -f Dockerfile . --template build/user-manifests/gmail-classifier.yaml
   only:
-    - main
-
-deploy_agent:
-  stage: deploy
-  image: docker-registry.gitlab.myteksi.net/library/alpine:latest
-  before_script:
-    - apk add --no-cache curl bash jq python3 openssl kubectl
-    - curl -sSL -o pcli https://portal.agent.palana.engtools.net/portal/pcli && chmod +x pcli
-    - ./pcli preflight
-  script:
-    - ./pcli create ${AGENT_NAME} 250 256 || true
-    - ./pcli run ${AGENT_NAME} --port 8080 --run-as-user 1000 --fs-group 1000 --replace
-  only:
-    - main
+    - master
