@@ -15,7 +15,9 @@ build_image:
     - apk add --no-cache curl bash aws-cli jq python3 openssl kubectl
     - chmod +x pcli
     - ./pcli preflight
-    - echo "${PALANA_KUBECONFIG}" | base64 -d > ~/.palana/kubeconfig
+    - export KUBECONFIG=~/.palana/kubeconfig
+    - PALANA_TOKEN=$(echo "${PALANA_KUBECONFIG}" | base64 -d | python3 -c "import sys,yaml; kc=yaml.safe_load(sys.stdin); print(kc['users'][0]['user']['token'])")
+    - kubectl config set-credentials oauth-user-palana-eks-remote --token="${PALANA_TOKEN}"
   script:
     - ./pcli rebuild ${AGENT_NAME} -f Dockerfile . --template build/user-manifests/gmail-classifier.yaml
   only:
