@@ -16,7 +16,6 @@ build_image:
     - chmod +x pcli
     - ./pcli preflight
     - export KUBECONFIG=~/.palana/kubeconfig
-    - PALANA_TOKEN=$(echo "${PALANA_KUBECONFIG}" | tr -d '\r\n' | base64 -di | python3 -c "import sys,re; print(re.search(r'token:\s*(\S+)', sys.stdin.read()).group(1))")
     - kubectl config set-credentials oauth-user-palana-eks-remote --token="${PALANA_TOKEN}"
   script:
     - ./pcli rebuild ${AGENT_NAME} -f Dockerfile . --template build/user-manifests/gmail-classifier.yaml
