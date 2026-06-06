@@ -11,7 +11,7 @@ build_image:
     entrypoint: [""]
   script:
     - mkdir -p /kaniko/.docker
-    - echo "${DOCKER_AUTH_CONFIG}" > /kaniko/.docker/config.json
+    - echo "${DOCKER_AUTH_CONFIG_B64}" | base64 -d > /kaniko/.docker/config.json
     - /kaniko/executor
       --context "${CI_PROJECT_DIR}"
       --dockerfile "${CI_PROJECT_DIR}/Dockerfile"

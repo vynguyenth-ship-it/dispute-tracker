@@ -56,8 +56,8 @@ declare -A VARS=(
   [AWS_ACCESS_KEY_ID]="$ACCESS_KEY"
   [AWS_SECRET_ACCESS_KEY]="$SECRET_KEY"
   [AWS_SESSION_TOKEN]="$SESSION_TOKEN"
-  [DOCKER_AUTH_CONFIG]="$DOCKER_AUTH_CONFIG"
 )
+DOCKER_AUTH_CONFIG_B64=$(printf '%s' "$DOCKER_AUTH_CONFIG" | base64 | tr -d '\n')
 for VAR_NAME in "${!VARS[@]}"; do
   VAL="${VARS[$VAR_NAME]}"
   # Delete if exists (ignore errors), then create fresh
@@ -69,6 +69,14 @@ for VAR_NAME in "${!VARS[@]}"; do
     --field "protected=false" > /dev/null
   echo "  ✓ $VAR_NAME"
 done
+# DOCKER_AUTH_CONFIG can't be masked (contains special chars) — store base64-encoded
+glab api --method DELETE "projects/${GITLAB_PROJECT}/variables/DOCKER_AUTH_CONFIG_B64" > /dev/null 2>&1 || true
+glab api --method POST "projects/${GITLAB_PROJECT}/variables" \
+  --field "key=DOCKER_AUTH_CONFIG_B64" \
+  --field "value=${DOCKER_AUTH_CONFIG_B64}" \
+  --field "masked=false" \
+  --field "protected=false" > /dev/null
+echo "  ✓ DOCKER_AUTH_CONFIG_B64"
 echo "✓ GitLab CI variables updated"
 
 # Trigger pipeline
