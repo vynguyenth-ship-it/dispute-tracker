@@ -7,6 +7,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY dispute_tracker.py .
 COPY streamlit_app.py .
+COPY .streamlit/secrets.toml .streamlit/secrets.toml
 
 EXPOSE 8080
 
