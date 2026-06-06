@@ -5,7 +5,6 @@ __pycache__/
 credentials.json
 token.json
 service_account.json
-.streamlit/secrets.toml
 gmail_auth.ipynb
 gmail-reclassify.ipynb
 inbox.mbox
