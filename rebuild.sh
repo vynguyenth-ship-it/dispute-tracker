@@ -37,6 +37,16 @@ ECR_REGION=$(echo "$CREDS" | python3 -c "import sys,json; print(json.load(sys.st
 echo "✓ ECR credentials received"
 echo "  Image: $ECR_REGISTRY/$ECR_REPOSITORY:latest"
 
+# Pre-compute the ECR Docker auth token locally
+echo "→ Computing Docker auth token..."
+ECR_PASSWORD=$(AWS_ACCESS_KEY_ID="$ACCESS_KEY" \
+  AWS_SECRET_ACCESS_KEY="$SECRET_KEY" \
+  AWS_SESSION_TOKEN="$SESSION_TOKEN" \
+  "$AWS" ecr get-login-password --region "$ECR_REGION")
+DOCKER_AUTH=$(printf 'AWS:%s' "$ECR_PASSWORD" | base64 | tr -d '\n')
+DOCKER_AUTH_CONFIG=$(printf '{"auths":{"%s":{"auth":"%s"}}}' "$ECR_REGISTRY" "$DOCKER_AUTH")
+echo "✓ Docker auth token ready"
+
 # Push ECR creds as GitLab CI variables (delete + recreate to avoid PUT/POST ambiguity)
 echo "→ Injecting ECR credentials into GitLab CI..."
 declare -A VARS=(
@@ -46,6 +56,7 @@ declare -A VARS=(
   [AWS_ACCESS_KEY_ID]="$ACCESS_KEY"
   [AWS_SECRET_ACCESS_KEY]="$SECRET_KEY"
   [AWS_SESSION_TOKEN]="$SESSION_TOKEN"
+  [DOCKER_AUTH_CONFIG]="$DOCKER_AUTH_CONFIG"
 )
 for VAR_NAME in "${!VARS[@]}"; do
   VAL="${VARS[$VAR_NAME]}"

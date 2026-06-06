@@ -3,21 +3,18 @@ stages:
 
 variables:
   AGENT_NAME: "gmail-classifier"
-  DOCKER_HOST: tcp://docker:2375
-  DOCKER_TLS_CERTDIR: ""
 
 build_image:
   stage: build
-  image: docker-registry.gitlab.myteksi.net/library/docker:latest
-  services:
-    - name: docker-registry.gitlab.myteksi.net/library/docker:dind
-      alias: docker
-      command: ["--tls=false"]
-  before_script:
-    - apk add --no-cache curl bash aws-cli jq python3 openssl
+  image:
+    name: gcr.io/kaniko-project/executor:v1.23.0-debug
+    entrypoint: [""]
   script:
-    - aws ecr get-login-password --region "${ECR_REGION}" | docker login --username AWS --password-stdin "${ECR_REGISTRY}"
-    - docker build -t "${ECR_REGISTRY}/${ECR_REPOSITORY}:latest" -f Dockerfile .
-    - docker push "${ECR_REGISTRY}/${ECR_REPOSITORY}:latest"
+    - mkdir -p /kaniko/.docker
+    - echo "${DOCKER_AUTH_CONFIG}" > /kaniko/.docker/config.json
+    - /kaniko/executor
+      --context "${CI_PROJECT_DIR}"
+      --dockerfile "${CI_PROJECT_DIR}/Dockerfile"
+      --destination "${ECR_REGISTRY}/${ECR_REPOSITORY}:latest"
   only:
     - master
