@@ -37,26 +37,26 @@ ECR_REGION=$(echo "$CREDS" | python3 -c "import sys,json; print(json.load(sys.st
 echo "✓ ECR credentials received"
 echo "  Image: $ECR_REGISTRY/$ECR_REPOSITORY:latest"
 
-# Push ECR creds as GitLab CI variables
+# Push ECR creds as GitLab CI variables (delete + recreate to avoid PUT/POST ambiguity)
 echo "→ Injecting ECR credentials into GitLab CI..."
-for VAR_NAME in ECR_REGISTRY ECR_REPOSITORY ECR_REGION AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN; do
-  case "$VAR_NAME" in
-    ECR_REGISTRY)      VAL="$ECR_REGISTRY" ;;
-    ECR_REPOSITORY)    VAL="$ECR_REPOSITORY" ;;
-    ECR_REGION)        VAL="$ECR_REGION" ;;
-    AWS_ACCESS_KEY_ID) VAL="$ACCESS_KEY" ;;
-    AWS_SECRET_ACCESS_KEY) VAL="$SECRET_KEY" ;;
-    AWS_SESSION_TOKEN) VAL="$SESSION_TOKEN" ;;
-  esac
-  # Update if exists, create if not
-  HTTP=$(glab api --method PUT "projects/${GITLAB_PROJECT}/variables/${VAR_NAME}" \
-    --field "value=${VAL}" --field "masked=true" --field "protected=false" \
-    -o /dev/null -q 2>&1 && echo 200 || echo 0)
-  if [[ "$HTTP" == "0" ]]; then
-    glab api --method POST "projects/${GITLAB_PROJECT}/variables" \
-      --field "key=${VAR_NAME}" --field "value=${VAL}" \
-      --field "masked=true" --field "protected=false" > /dev/null
-  fi
+declare -A VARS=(
+  [ECR_REGISTRY]="$ECR_REGISTRY"
+  [ECR_REPOSITORY]="$ECR_REPOSITORY"
+  [ECR_REGION]="$ECR_REGION"
+  [AWS_ACCESS_KEY_ID]="$ACCESS_KEY"
+  [AWS_SECRET_ACCESS_KEY]="$SECRET_KEY"
+  [AWS_SESSION_TOKEN]="$SESSION_TOKEN"
+)
+for VAR_NAME in "${!VARS[@]}"; do
+  VAL="${VARS[$VAR_NAME]}"
+  # Delete if exists (ignore errors), then create fresh
+  glab api --method DELETE "projects/${GITLAB_PROJECT}/variables/${VAR_NAME}" > /dev/null 2>&1 || true
+  glab api --method POST "projects/${GITLAB_PROJECT}/variables" \
+    --field "key=${VAR_NAME}" \
+    --field "value=${VAL}" \
+    --field "masked=true" \
+    --field "protected=false" > /dev/null
+  echo "  ✓ $VAR_NAME"
 done
 echo "✓ GitLab CI variables updated"
 
