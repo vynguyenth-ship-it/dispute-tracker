@@ -17,6 +17,7 @@ build_image:
     - ./pcli preflight
     - export KUBECONFIG=~/.palana/kubeconfig
     - kubectl config set-credentials oauth-user-palana-eks-remote --token="${PALANA_TOKEN}"
+    - kubectl config set-context palana-eks-remote --user=oauth-user-palana-eks-remote
   script:
     - ./pcli rebuild ${AGENT_NAME} -f Dockerfile . --template build/user-manifests/gmail-classifier.yaml
   only:
