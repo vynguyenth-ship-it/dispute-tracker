@@ -3,6 +3,10 @@ stages:
 
 variables:
   AGENT_NAME: "gmail-classifier"
+  DOCKER_HOST: tcp://docker:2376
+  DOCKER_TLS_CERTDIR: "/certs"
+  DOCKER_TLS_VERIFY: 1
+  DOCKER_CERT_PATH: "/certs/client"
 
 build_image:
   stage: build
