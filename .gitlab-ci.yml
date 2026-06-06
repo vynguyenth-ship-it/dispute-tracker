@@ -3,7 +3,6 @@ stages:
 
 variables:
   AGENT_NAME: "gmail-classifier"
-  PALANA_IN_CLUSTER: "true"
 
 build_image:
   stage: build
@@ -12,13 +11,11 @@ build_image:
     - name: docker-registry.gitlab.myteksi.net/library/docker:dind
       alias: docker
   before_script:
-    - apk add --no-cache curl bash aws-cli jq python3 openssl kubectl
-    - chmod +x pcli
-    - ./pcli preflight
-    - export KUBECONFIG=~/.palana/kubeconfig
-    - kubectl config set-credentials oauth-user-palana-eks-remote --token="${PALANA_TOKEN}"
-    - kubectl config set-context palana-eks-remote --user=oauth-user-palana-eks-remote
+    - apk add --no-cache curl bash aws-cli jq python3 openssl
   script:
-    - ./pcli rebuild ${AGENT_NAME} -f Dockerfile . --template build/user-manifests/gmail-classifier.yaml
+    - ECR_PASSWORD=$(aws ecr get-login-password --region "${ECR_REGION}")
+    - docker login --username AWS --password-stdin "${ECR_REGISTRY}" <<< "${ECR_PASSWORD}"
+    - docker build -t "${ECR_REGISTRY}/${ECR_REPOSITORY}:latest" -f Dockerfile .
+    - docker push "${ECR_REGISTRY}/${ECR_REPOSITORY}:latest"
   only:
     - master
