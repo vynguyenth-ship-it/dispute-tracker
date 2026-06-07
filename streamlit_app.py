@@ -21,6 +21,25 @@ from dispute_tracker import (
     TZ, CONFIG,
 )
 
+import os
+from pathlib import Path
+
+# Auto-create .streamlit/secrets.toml from env vars to bypass Streamlit's rigid parser
+_secrets_dir = Path(".streamlit")
+_secrets_file = _secrets_dir / "secrets.toml"
+if not _secrets_file.exists():
+    _secrets_dir.mkdir(exist_ok=True)
+    with open(_secrets_file, "w") as _f:
+        _f.write("# Auto-generated secrets from Palana environment variables\n\n")
+        cookie_key = os.environ.get("COOKIE_KEY", "dispute-tracker-secret-2026")
+        _f.write(f'cookie_key = "{cookie_key}"\n\n')
+        
+        # Populate Google OAuth credentials if injected as environment variables
+        _f.write("[google_oauth]\n")
+        _f.write(f'client_id = "{os.environ.get("GOOGLE_CLIENT_ID", "")}"\n')
+        _f.write(f'client_secret = "{os.environ.get("GOOGLE_CLIENT_SECRET", "")}"\n')
+        _f.write(f'redirect_uri = "{os.environ.get("GOOGLE_REDIRECT_URI", "")}"\n')
+        
 # ── Constants ─────────────────────────────────────────────────────────────────
 QUEUES   = ["Dispute", "Update Details", "Invoice", "Internal Invoice", "Others"]
 STATUSES = ["New", "In Progress", "Completed", "Rejected"]

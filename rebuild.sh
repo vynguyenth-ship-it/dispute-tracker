@@ -27,12 +27,12 @@ CREDS=$(curl -sf -X POST "$AGENT_API/api/v1/ecr/credentials" \
   -H "Content-Type: application/json" \
   -d "{\"image_name\": \"$IMAGE_NAME\"}")
 
-ECR_REGISTRY=$(echo "$CREDS" | python3 -c "import sys,json; print(json.load(sys.stdin)['registry'])")
-ECR_REPOSITORY=$(echo "$CREDS" | python3 -c "import sys,json; print(json.load(sys.stdin)['repository'])")
-ACCESS_KEY=$(echo "$CREDS" | python3 -c "import sys,json; print(json.load(sys.stdin)['access_key_id'])")
-SECRET_KEY=$(echo "$CREDS" | python3 -c "import sys,json; print(json.load(sys.stdin)['secret_access_key'])")
-SESSION_TOKEN=$(echo "$CREDS" | python3 -c "import sys,json; print(json.load(sys.stdin)['session_token'])")
-ECR_REGION=$(echo "$CREDS" | python3 -c "import sys,json; print(json.load(sys.stdin)['region'])")
+ECR_REGISTRY=$(echo "$CREDS" | python3 -c "import sys,json; print(json.load(sys.stdin)['registry'])" | tr -d '\r\n')
+ECR_REPOSITORY=$(echo "$CREDS" | python3 -c "import sys,json; print(json.load(sys.stdin)['repository'])" | tr -d '\r\n')
+ACCESS_KEY=$(echo "$CREDS" | python3 -c "import sys,json; print(json.load(sys.stdin)['access_key_id'])" | tr -d '\r\n')
+SECRET_KEY=$(echo "$CREDS" | python3 -c "import sys,json; print(json.load(sys.stdin)['secret_access_key'])" | tr -d '\r\n')
+SESSION_TOKEN=$(echo "$CREDS" | python3 -c "import sys,json; print(json.load(sys.stdin)['session_token'])" | tr -d '\r\n')
+ECR_REGION=$(echo "$CREDS" | python3 -c "import sys,json; print(json.load(sys.stdin)['region'])" | tr -d '\r\n')
 
 echo "✓ ECR credentials received"
 echo "  Image: $ECR_REGISTRY/$ECR_REPOSITORY:latest"
@@ -77,6 +77,44 @@ glab api --method POST "projects/${GITLAB_PROJECT}/variables" \
   --field "masked=false" \
   --field "protected=false" > /dev/null
 echo "  ✓ DOCKER_AUTH_CONFIG_B64"
+
+# Bake secrets.toml into the image via CI variable
+SECRETS_TOML="${CI_PROJECT_DIR:-.}/.streamlit/secrets.toml"
+if [[ ! -f "$SECRETS_TOML" ]]; then
+  SECRETS_TOML="$(dirname "$0")/.streamlit/secrets.toml"
+fi
+if [[ ! -f "$SECRETS_TOML" ]]; then
+  echo "✗ .streamlit/secrets.toml not found — cannot inject STREAMLIT_SECRETS_B64"
+  exit 1
+fi
+STREAMLIT_SECRETS_B64=$(base64 < "$SECRETS_TOML" | tr -d '\n')
+glab api --method DELETE "projects/${GITLAB_PROJECT}/variables/STREAMLIT_SECRETS_B64" > /dev/null 2>&1 || true
+GITLAB_HOST="https://gitlab.myteksi.net"
+GLAB_CONFIG="$APPDATA/Local/glab-cli/config.yml"
+if [[ ! -f "$GLAB_CONFIG" ]]; then
+  GLAB_CONFIG="$HOME/AppData/Local/glab-cli/config.yml"
+fi
+GITLAB_TOKEN=$(grep -A1 'gitlab.myteksi.net:' "$GLAB_CONFIG" | grep 'token:' | awk '{print $2}' | tr -d '\r\n')
+if [[ -z "$GITLAB_TOKEN" ]]; then
+  echo "✗ Could not retrieve GitLab token from $GLAB_CONFIG — run: glab auth login"
+  exit 1
+fi
+TMPFILE=$(mktemp)
+python3 -c "
+import json, sys
+payload = {'key': 'STREAMLIT_SECRETS_B64', 'value': sys.argv[1], 'masked': False, 'protected': False}
+print(json.dumps(payload))
+" "$STREAMLIT_SECRETS_B64" > "$TMPFILE"
+HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${GITLAB_HOST}/api/v4/projects/${GITLAB_PROJECT}/variables" \
+  -H "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+  -H "Content-Type: application/json" \
+  --data @"$TMPFILE")
+rm -f "$TMPFILE"
+if [[ "$HTTP_STATUS" != "201" && "$HTTP_STATUS" != "200" ]]; then
+  echo "✗ Failed to set STREAMLIT_SECRETS_B64 (HTTP $HTTP_STATUS)"
+  exit 1
+fi
+echo "  ✓ STREAMLIT_SECRETS_B64"
 echo "✓ GitLab CI variables updated"
 
 # Trigger pipeline

@@ -12,7 +12,9 @@ Exported:
     archive_case(case_id)          — move a row from Cases → Archive tab
     archive_old_completed()        — archive completed/rejected cases > 1 day old
 """
-
+#===========================================================================
+# import libraries and modules
+#===========================================================================
 import os
 import logging
 from datetime import datetime, timedelta
@@ -37,7 +39,7 @@ CONFIG = {
     "TOKEN_FILE":       os.path.join(os.path.dirname(__file__), "token.json"),
 }
 
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]  # Only Sheets API access is needed for this app
 
 TZ = ZoneInfo(CONFIG["TIMEZONE"])
 
@@ -112,7 +114,7 @@ def get_sheets_service():
 
 # ============================================================
 # SHEET READ / WRITE
-# ============================================================
+# ============================================================  
 def load_cases(tab_name: str | None = None) -> list[dict]:
     """Read all rows from a sheet tab; return as list of field-keyed dicts."""
     tab = tab_name or CONFIG["SHEET_TAB_NAME"]

@@ -15,6 +15,7 @@ storage:
 container:
   image: placeholder   # overwritten by pcli rebuild via render_rebuild_template_json
   web_port: 8080
+  command: ["python", "-m", "streamlit", "run", "streamlit_app.py", "--server.port=8080", "--server.address=0.0.0.0", "--server.headless=true", "--server.enableCORS=false", "--server.enableXsrfProtection=false"]
   env:
     - name: PYTHONUNBUFFERED
       value: "1"
